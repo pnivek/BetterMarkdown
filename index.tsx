@@ -230,13 +230,15 @@ export default definePlugin({
      * We replicate this by only intervening when table syntax is detected.
      * For non-table content, we return the string as-is (same as _A).
      */
-    renderContent(message: any, content: string): any {
-        // _A edge cases (voice hangout, deleted) don't have table markdown,
-        // so returning content as-is for non-table content is equivalent
-        if (typeof content !== "string" || !content) return content;
-        if (!hasTableSyntax(content)) return content;
+    renderContent(message: any, content: any): any {
+        // content is already processed through ti.A (module 375199) — it may be
+        // React elements (markdown AST), not a raw string. Use message.content
+        // for raw table detection instead.
+        const raw = message?.content;
+        if (typeof raw !== "string" || !raw) return content;
+        if (!hasTableSyntax(raw)) return content;
 
-        const blocks = parseContentBlocks(content);
+        const blocks = parseContentBlocks(raw);
         return renderInlineContent(blocks);
     },
 
