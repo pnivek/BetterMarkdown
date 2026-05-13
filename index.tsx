@@ -4,12 +4,11 @@
  *
  * BetterMarkdown - Renders markdown tables inline in message content.
  *
- * Approach: Directly wraps the _A function (module 291812) at runtime
- * in start(). _A is Discord's content-rendering pass-through:
- *   function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?"":e.hasFlag(d.pr7.SOURCE_MESSAGE_DELETED)?p.intl.string(p.t.JOtgSw):t}
+ * Patches module 291812's _A function (the content pass-through) by
+ * injecting a renderOutput() call at the start of the function body.
  *
- * We replace _A with a wrapper: checks for table syntax in message.content,
- * returns a React fragment with tables if found, falls through otherwise.
+ * Actual Discord source (verified at runtime):
+ *   function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?"":e.hasFlag(d.pr7.SOURCE_MESSAGE_DELETED)?p.intl.string(p.t.JOtgSw):t}
  */
 
 import { Devs } from "@utils/constants";
@@ -208,37 +207,19 @@ export default definePlugin({
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    /**
-     * We save references to restore on stop()
-     */
-    _orig: null as (Function | null),
-
-    start() {
-        const mod = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
-        if (!mod || typeof mod._A !== "function") {
-            console.warn("[BetterMarkdown] _A not found (module 291812)");
-            return;
-        }
-
-        this._orig = mod._A;
-
-        mod._A = (e: any, t: any) => {
-            const raw = e?.content;
-            if (typeof raw === "string" && hasTableSyntax(raw)) {
-                const blocks = parseContentBlocks(raw);
-                return renderInlineContent(blocks);
-            }
-            return this._orig!(e, t);
-        };
-
-        console.log("[BetterMarkdown] _A wrapped successfully");
+    renderOutput(message: any, content: any): any {
+        const raw = message?.content;
+        if (typeof raw !== "string" || !raw) return void 0;
+        if (!hasTableSyntax(raw)) return void 0;
+        const blocks = parseContentBlocks(raw);
+        return renderInlineContent(blocks);
     },
 
-    stop() {
-        if (this._orig) {
-            const mod = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
-            if (mod) mod._A = this._orig;
-            this._orig = null;
-        }
-    },
+    patches: [{
+        find: "VOICE_HANGOUT_INVITE",
+        replacement: {
+            match: /function\s+(\\i)\((\\i),(\\i)\)\{/,
+            replace: "function $1($2,$3){var __r=$self.renderOutput($2,$3);if(__r!==void 0)return __r;",
+        },
+    }],
 });
