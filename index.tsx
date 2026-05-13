@@ -5,10 +5,15 @@
  * BetterMarkdown - Renders markdown tables inline in message content,
  * replacing the raw pipe-delimited text with styled HTML tables.
  *
- * Approach: Patches module 501440's tS component at the content rendering
- * call site (0,tA._A)(l,s). Since _A (module 291812) is a pass-through
- * for normal messages, we intercept and return custom JSX when tables
- * are detected, preserving Discord's default rendering otherwise.
+ * Approach: Patches the _A function definition in module 291812.
+ * _A is Discord's content-rendering pass-through:
+ *   function _A(e,t){
+ *     return e.type===VOICE_HANGOUT_INVITE?"":
+ *            e.hasFlag(SOURCE_MESSAGE_DELETED)?intl("Deleted"):t
+ *   }
+ *
+ * We wrap it: call $self.renderContent(e,t) first. If it returns
+ * undefined (no table detected), fall through to the original logic.
  */
 
 import definePlugin from "@utils/types";
@@ -40,7 +45,7 @@ function isTableRow(line: string): boolean {
 }
 
 function isSeparator(line: string): boolean {
-    return /^\|[\s\-:|]+\|$/.test(line.trim());
+    return /^\|[\\s\\-:|]+\|$/.test(line.trim());
 }
 
 function splitCells(line: string): string[] {
@@ -214,48 +219,45 @@ export default definePlugin({
     tags: ["Chat", "Utility"],
 
     /**
-     * Intercepts the content rendering call in module 501440's tS component.
+     * Called by our patched _A wrapper in module 291812.
      *
-     * Called in place of (0,tA._A)(l,s) where:
-     *   l = message object (from the tS memo component)
-     *   s = content string (already processed by ti.A formatter, module 375199)
+     * Parameters:
+     *   message - the message object (e from _A's signature)
+     *   content - the rendered content string (t from _A's signature)
      *
-     * The original _A (module 291812) is a simple pass-through for normal messages:
-     *   function _A(e, t) {
-     *     return e.type === VOICE_HANGOUT_INVITE ? "" :
-     *            e.hasFlag(SOURCE_MESSAGE_DELETED) ? intl("Deleted") :
-     *            t
-     *   }
-     *
-     * We replicate this by only intervening when table syntax is detected.
-     * For non-table content, we return the string as-is (same as _A).
+     * Returns undefined if no table content is detected, allowing the
+     * original _A logic (voice hangout / deleted / normal) to proceed.
+     * Returns a React fragment (table JSX) if table syntax is found.
      */
     renderContent(message: any, content: any): any {
-        window.__bm = { called: true, mid: message?.id, ts: Date.now() };
-
-        // content is already processed through ti.A (module 375199) — it may be
-        // React elements (markdown AST), not a raw string. Use message.content
-        // for raw table detection instead.
+        // Use the raw message content for table detection.
         const raw = message?.content;
-        if (typeof raw !== "string" || !raw) return content;
-        if (!hasTableSyntax(raw)) return content;
+        if (typeof raw !== "string" || !raw) return undefined;
+        if (!hasTableSyntax(raw)) return undefined;
 
         const blocks = parseContentBlocks(raw);
         return renderInlineContent(blocks);
     },
 
     patches: [{
-        // Unique string from tS's edited-message indicator rendering.
-        // tS is the message body component inside module 501440.
-        // The target call site: children:[i??(0,tA._A)(l,s),h?.isBlockedEdit&&null!=l.timestamp&&...]
-        find: "isBlockedEdit&&null!=l.timestamp",
+        /**
+         * Module 291812 exports the _A content-rendering pass-through.
+         * VOICE_HANGOUT_INVITE is unique to this module.
+         *
+         * Original:
+         *   function _A(e,t){return e.type===VOICE_HANGOUT_INVITE?\
+         *   "":e.hasFlag(SOURCE_MESSAGE_DELETED)?intl("Deleted"):t}
+         *
+         * Patched:
+         *   function _A(e,t){var _=$self.renderContent(e,t);\
+         *   if(_!==void 0)return _;return e.type===VOICE_HANGOUT_INVITE?\
+         *   '':e.hasFlag(SOURCE_MESSAGE_DELETED)?intl('Deleted'):t}
+         */
+        find: "VOICE_HANGOUT_INVITE",
+
         replacement: {
-            // Removing i?? — i is always undefined (nG never passes children to tS),
-            // yet the nullish coalescing was never reaching our function.
-            // Match: children:[i??(0,tA._A)(l,s),...
-            // Capture the (l,s) args for our renderContent handler.
-            match: /children:\[\w+\?\?\(0,\w+\._A\)\((\w+),(\w+)\)/,
-            replace: "children:[$self.renderContent($1,$2)",
+            match: /function\s+(\w+)\((\w+),(\w+)\)\{return\s*\2\.type===VOICE_HANGOUT_INVITE\?"":\2\.hasFlag\(SOURCE_MESSAGE_DELETED\)\?intl\("Deleted"\):\3\}/,
+            replace: "function $1($2,$3){var _=$self.renderContent($2,$3);if(_!==void 0)return _;return $2.type===VOICE_HANGOUT_INVITE?'':$2.hasFlag(SOURCE_MESSAGE_DELETED)?intl('Deleted'):$3}",
         },
     }],
 });
