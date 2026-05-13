@@ -2,22 +2,12 @@
  * Vencord, a modification for Discord's desktop app
  * Copyright (c) 2025 pnivek
  *
- * BetterMarkdown - Renders markdown tables inline in message content,
- * replacing the raw pipe-delimited text with styled HTML tables.
- *
- * Approach: Patches the _A function definition in module 291812.
- * _A is Discord's content-rendering pass-through:
- *   function _A(e,t){
- *     return e.type===VOICE_HANGOUT_INVITE?"":
- *            e.hasFlag(SOURCE_MESSAGE_DELETED)?intl("Deleted"):t
- *   }
- *
- * We wrap it: call $self.renderContent(e,t) first. If it returns
- * undefined (no table detected), fall through to the original logic.
+ * BetterMarkdown - Renders markdown tables with styled HTML tables.
+ * Uses addMessageAccessory for reliable rendering.
  */
 
-import definePlugin from "@utils/types";
 import { Devs } from "@utils/constants";
+import definePlugin, { OptionType } from "@utils/types";
 import { React } from "@webpack/common";
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -26,7 +16,7 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
 
-// ─── Colors (hardcoded, Discord dark theme) ──────────────────────
+// ─── Colors ────────────────────────────────────────────────────────
 
 const C = {
     text: "#dbdee1",
@@ -45,17 +35,13 @@ function isTableRow(line: string): boolean {
 }
 
 function isSeparator(line: string): boolean {
-    return /^\|[\\s\\-:|]+\|$/.test(line.trim());
+    return /^\|[\s\-:|]+\|$/.test(line.trim());
 }
 
 function splitCells(line: string): string[] {
     return line.split("|").slice(1, -1).map(c => c.trim());
 }
 
-/**
- * Quick heuristic: does content contain GFM-style table syntax?
- * Requires at least 2 pipe rows with either a separator or matching columns.
- */
 function hasTableSyntax(content: string): boolean {
     const lines = content.split("\n");
     let rowCount = 0;
@@ -184,80 +170,36 @@ function TableComponent({ header, body }: { header: string[]; body: string[][] }
     );
 }
 
-function renderInlineContent(blocks: ContentBlock[]): React.ReactNode {
-    if (blocks.length === 1 && blocks[0].type === "text") {
-        // Pure text - return raw string so Discord renders it normally
-        return blocks[0].text;
-    }
-
-    // Mixed content: text interspersed with tables
-    const children: React.ReactNode[] = [];
-    for (const block of blocks) {
-        if (block.type === "text") {
-            children.push(
-                React.createElement("span", { key: children.length }, block.text)
-            );
-        } else {
-            children.push(
-                React.createElement(TableComponent, {
-                    key: children.length,
-                    header: block.header,
-                    body: block.body,
-                })
-            );
-        }
-    }
-    return React.createElement(React.Fragment, null, ...children);
-}
-
 // ─── Plugin Definition ─────────────────────────────────────────────
 
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables inline in message content, replacing raw pipe text with styled tables",
+    description: "Renders markdown tables as styled tables below messages",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    /**
-     * Called by our patched _A wrapper in module 291812.
-     *
-     * Parameters:
-     *   message - the message object (e from _A's signature)
-     *   content - the rendered content string (t from _A's signature)
-     *
-     * Returns undefined if no table content is detected, allowing the
-     * original _A logic (voice hangout / deleted / normal) to proceed.
-     * Returns a React fragment (table JSX) if table syntax is found.
-     */
-    renderContent(message: any, content: any): any {
-        // Use the raw message content for table detection.
-        const raw = message?.content;
-        if (typeof raw !== "string" || !raw) return undefined;
-        if (!hasTableSyntax(raw)) return undefined;
+    addMessageAccessory: "better-markdown",
+
+    renderMessageAccessory(props: any) {
+        const { message } = props;
+        if (!message?.content) return null;
+
+        const raw = message.content;
+        if (typeof raw !== "string" || !raw) return null;
+        if (!hasTableSyntax(raw)) return null;
 
         const blocks = parseContentBlocks(raw);
-        return renderInlineContent(blocks);
+        const tables = blocks.filter(b => b.type === "table");
+        if (tables.length === 0) return null;
+
+        const children = tables.map((table, i) => (
+            <TableComponent
+                key={i}
+                header={(table as any).header}
+                body={(table as any).body}
+            />
+        ));
+
+        return <>{children}</>;
     },
-
-    patches: [{
-        /**
-         * Module 291812 exports the _A content-rendering pass-through.
-         * VOICE_HANGOUT_INVITE is unique to this module.
-         *
-         * Original:
-         *   function _A(e,t){return e.type===VOICE_HANGOUT_INVITE?\
-         *   "":e.hasFlag(SOURCE_MESSAGE_DELETED)?intl("Deleted"):t}
-         *
-         * Patched:
-         *   function _A(e,t){var _=$self.renderContent(e,t);\
-         *   if(_!==void 0)return _;return e.type===VOICE_HANGOUT_INVITE?\
-         *   '':e.hasFlag(SOURCE_MESSAGE_DELETED)?intl('Deleted'):t}
-         */
-        find: "VOICE_HANGOUT_INVITE",
-
-        replacement: {
-            match: /function\s+(\w+)\((\w+),(\w+)\)\{return\s*\2\.type===VOICE_HANGOUT_INVITE\?"":\2\.hasFlag\(SOURCE_MESSAGE_DELETED\)\?intl\("Deleted"\):\3\}/,
-            replace: "function $1($2,$3){var _=$self.renderContent($2,$3);if(_!==void 0)return _;return $2.type===VOICE_HANGOUT_INVITE?'':$2.hasFlag(SOURCE_MESSAGE_DELETED)?intl('Deleted'):$3}",
-        },
-    }],
 });
