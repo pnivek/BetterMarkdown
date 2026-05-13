@@ -4,11 +4,27 @@
  *
  * BetterMarkdown - Renders markdown tables inline in message content.
  *
- * Patches module 291812's _A function (the content pass-through) by
- * injecting a renderOutput() call at the start of the function body.
+ * Two patches, layered for robustness:
  *
- * Actual Discord source (verified at runtime):
- *   function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?"":e.hasFlag(d.pr7.SOURCE_MESSAGE_DELETED)?p.intl.string(p.t.JOtgSw):t}
+ *   1. The useMessageRenderedContent-style hook in the module containing
+ *      "customRenderedContent". This hook early-returns
+ *        if (null != msg.customRenderedContent) return msg.customRenderedContent
+ *      before any markdown processing. Injecting our check right before that
+ *      line short-circuits the entire pipeline when we have a table.
+ *
+ *   2. The _A function in module 291812 ("VOICE_HANGOUT_INVITE"). Verified
+ *      runtime source:
+ *        function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?"":
+ *          e.hasFlag(d.pr7.SOURCE_MESSAGE_DELETED)?p.intl.string(p.t.JOtgSw):t}
+ *      This is the final content pass-through. We wrap it so that if the
+ *      hook patch didn't fire (different code path, different Discord build,
+ *      etc.), we still intercept here.
+ *
+ * Both patches use \i (single backslash + i) in regex literals. Vencord
+ * processes regex.source at build time and converts \i to an identifier
+ * matcher. We anchor each match on a unique string from the body (the
+ * literal property "customRenderedContent" / "VOICE_HANGOUT_INVITE") so
+ * minified variable renaming in the factory does not break us.
  */
 
 import { Devs } from "@utils/constants";
@@ -207,19 +223,56 @@ export default definePlugin({
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    renderOutput(message: any, content: any): any {
-        const raw = message?.content;
+    // Called from both patch sites. Both pass `message` as first arg; the
+    // _A wrapper passes the rendered-content fallback as second arg, which
+    // we don't currently use. Returns ReactNode for tables, undefined for
+    // everything else (so the host pipeline continues unchanged).
+    renderOutput(message: any, _content?: any): any {
+        if (!message || typeof message !== "object") return void 0;
+        const raw = message.content;
         if (typeof raw !== "string" || !raw) return void 0;
         if (!hasTableSyntax(raw)) return void 0;
         const blocks = parseContentBlocks(raw);
         return renderInlineContent(blocks);
     },
 
-    patches: [{
-        find: "VOICE_HANGOUT_INVITE",
-        replacement: {
-            match: /function\s+(\\i)\((\\i),(\\i)\)\{/,
-            replace: "function $1($2,$3){var __r=$self.renderOutput($2,$3);if(__r!==void 0)return __r;",
+    patches: [
+        // ── Patch 1: the customRenderedContent early-return hook ──
+        //
+        // Matches:   if(null!=X.customRenderedContent)return X.customRenderedContent
+        // Becomes:   var __vbm=$self.renderOutput(X);
+        //            if(__vbm!==void 0)return __vbm;
+        //            if(null!=X.customRenderedContent)return X.customRenderedContent
+        //
+        // X is captured as \1 so the back-reference inside the same match
+        // forces both occurrences to be the same identifier.
+        {
+            find: "customRenderedContent",
+            replacement: {
+                match: /if\(null!=(\i)\.customRenderedContent\)return \1\.customRenderedContent/,
+                replace: "var __vbm=$self.renderOutput($1);if(__vbm!==void 0)return __vbm;$&",
+            },
         },
-    }],
+
+        // ── Patch 2: the _A function in module 291812 ──
+        //
+        // Anchored on the unique tail
+        //   "function <name?>(<msg>,<content>){return <msg>.type===<ns>.VOICE_HANGOUT_INVITE"
+        // so we match regardless of minified function/param names. We capture
+        // the namespace chain leading to .VOICE_HANGOUT_INVITE ($4) and splice
+        // it back so the original return tail still parses.
+        //
+        // Capture groups:
+        //   $1 = optional " <name>" of the function (may be empty)
+        //   $2 = first param identifier (the message)
+        //   $3 = second param identifier (the upstream rendered content)
+        //   $4 = namespace chain ending in a dot, e.g. "d.lAJ."
+        {
+            find: "VOICE_HANGOUT_INVITE",
+            replacement: {
+                match: /function((?:\s+\i)?)\((\i),(\i)\)\{return \2\.type===((?:\i\.)+)VOICE_HANGOUT_INVITE/,
+                replace: "function$1($2,$3){var __vbm=$self.renderOutput($2,$3);if(__vbm!==void 0)return __vbm;return $2.type===$4VOICE_HANGOUT_INVITE",
+            },
+        },
+    ],
 });
