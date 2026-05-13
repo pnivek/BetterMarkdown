@@ -2,12 +2,14 @@
  * Vencord, a modification for Discord's desktop app
  * Copyright (c) 2025 pnivek
  *
- * BetterMarkdown - Renders markdown tables with styled HTML tables.
- * Uses addMessageAccessory for reliable rendering.
+ * BetterMarkdown - Renders markdown tables inline by patching
+ * the _A content pass-through in module 291812 at runtime
+ * using Vencord's after() API (no fragile regex/module patching).
  */
 
 import { Devs } from "@utils/constants";
-import definePlugin, { OptionType } from "@utils/types";
+import definePlugin from "@utils/types";
+import { after } from "@utils/patches";
 import { React } from "@webpack/common";
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -16,7 +18,7 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
 
-// ─── Colors ────────────────────────────────────────────────────────
+// ─── Colors (Discord dark theme) ──────────────────────────────────
 
 const C = {
     text: "#dbdee1",
@@ -170,36 +172,61 @@ function TableComponent({ header, body }: { header: string[]; body: string[][] }
     );
 }
 
+function renderInlineContent(blocks: ContentBlock[]): React.ReactNode {
+    if (blocks.length === 1 && blocks[0].type === "text") {
+        return blocks[0].text;
+    }
+
+    const children: React.ReactNode[] = [];
+    for (const block of blocks) {
+        if (block.type === "text") {
+            children.push(
+                React.createElement("span", { key: children.length }, block.text)
+            );
+        } else {
+            children.push(
+                React.createElement(TableComponent, {
+                    key: children.length,
+                    header: block.header,
+                    body: block.body,
+                })
+            );
+        }
+    }
+    return React.createElement(React.Fragment, null, ...children);
+}
+
 // ─── Plugin Definition ─────────────────────────────────────────────
 
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables as styled tables below messages",
+    description: "Renders markdown tables inline in message content by wrapping Discord's _A render pass-through",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    addMessageAccessory: "better-markdown",
+    start() {
+        const mod = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
+        if (!mod || !mod._A) {
+            console.warn("[BetterMarkdown] Module 291812 not found, tables disabled");
+            return;
+        }
 
-    renderMessageAccessory(props: any) {
-        const { message } = props;
-        if (!message?.content) return null;
+        after(mod, "_A", (args: [any, any], ret: any) => {
+            const [message] = args;
+            const raw = message?.content;
+            if (typeof raw !== "string" || !raw) return ret;
+            if (!hasTableSyntax(raw)) return ret;
+            // Only intercept for normal messages (string returns)
+            if (typeof ret !== "string") return ret;
 
-        const raw = message.content;
-        if (typeof raw !== "string" || !raw) return null;
-        if (!hasTableSyntax(raw)) return null;
+            const blocks = parseContentBlocks(raw);
+            return renderInlineContent(blocks);
+        });
 
-        const blocks = parseContentBlocks(raw);
-        const tables = blocks.filter(b => b.type === "table");
-        if (tables.length === 0) return null;
+        console.log("[BetterMarkdown] Table rendering active via _A wrapper");
+    },
 
-        const children = tables.map((table, i) => (
-            <TableComponent
-                key={i}
-                header={(table as any).header}
-                body={(table as any).body}
-            />
-        ));
-
-        return <>{children}</>;
+    stop() {
+        // after() patches are auto-cleaned by Vencord on plugin disable
     },
 });
