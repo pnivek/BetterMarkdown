@@ -254,7 +254,7 @@ export default definePlugin({
             // yet the nullish coalescing was never reaching our function.
             // Match: children:[i??(0,tA._A)(l,s),...
             // Capture the (l,s) args for our renderContent handler.
-            match: /children:\[i\?\?\(0,\i\._A\)\((\i),(\i)\)/,
+            match: /children:\[\w+\?\?\(0,\w+\._A\)\((\w+),(\w+)\)/,
             replace: "children:[$self.renderContent($1,$2)",
         },
     }],
