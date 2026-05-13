@@ -2,14 +2,18 @@
  * Vencord, a modification for Discord's desktop app
  * Copyright (c) 2025 pnivek
  *
- * BetterMarkdown - Renders markdown tables inline by patching
- * the _A content pass-through in module 291812 at runtime
- * using Vencord's after() API (no fragile regex/module patching).
+ * BetterMarkdown - Renders markdown tables inline in message content.
+ *
+ * Approach: Directly wraps the _A function (module 291812) at runtime
+ * in start(). _A is Discord's content-rendering pass-through:
+ *   function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?"":e.hasFlag(d.pr7.SOURCE_MESSAGE_DELETED)?p.intl.string(p.t.JOtgSw):t}
+ *
+ * We replace _A with a wrapper: checks for table syntax in message.content,
+ * returns a React fragment with tables if found, falls through otherwise.
  */
 
 import { Devs } from "@utils/constants";
 import definePlugin from "@utils/types";
-import { after } from "@utils/patches";
 import { React } from "@webpack/common";
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -200,33 +204,41 @@ function renderInlineContent(blocks: ContentBlock[]): React.ReactNode {
 
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables inline in message content by wrapping Discord's _A render pass-through",
+    description: "Renders markdown tables inline in message content",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
+    /**
+     * We save references to restore on stop()
+     */
+    _orig: null as (Function | null),
+
     start() {
         const mod = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
-        if (!mod || !mod._A) {
-            console.warn("[BetterMarkdown] Module 291812 not found, tables disabled");
+        if (!mod || typeof mod._A !== "function") {
+            console.warn("[BetterMarkdown] _A not found (module 291812)");
             return;
         }
 
-        after(mod, "_A", (args: [any, any], ret: any) => {
-            const [message] = args;
-            const raw = message?.content;
-            if (typeof raw !== "string" || !raw) return ret;
-            if (!hasTableSyntax(raw)) return ret;
-            // Only intercept for normal messages (string returns)
-            if (typeof ret !== "string") return ret;
+        this._orig = mod._A;
 
-            const blocks = parseContentBlocks(raw);
-            return renderInlineContent(blocks);
-        });
+        mod._A = (e: any, t: any) => {
+            const raw = e?.content;
+            if (typeof raw === "string" && hasTableSyntax(raw)) {
+                const blocks = parseContentBlocks(raw);
+                return renderInlineContent(blocks);
+            }
+            return this._orig!(e, t);
+        };
 
-        console.log("[BetterMarkdown] Table rendering active via _A wrapper");
+        console.log("[BetterMarkdown] _A wrapped successfully");
     },
 
     stop() {
-        // after() patches are auto-cleaned by Vencord on plugin disable
+        if (this._orig) {
+            const mod = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
+            if (mod) mod._A = this._orig;
+            this._orig = null;
+        }
     },
 });
