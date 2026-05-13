@@ -231,6 +231,8 @@ export default definePlugin({
      * For non-table content, we return the string as-is (same as _A).
      */
     renderContent(message: any, content: any): any {
+        window.__bm = { called: true, mid: message?.id, ts: Date.now() };
+
         // content is already processed through ti.A (module 375199) — it may be
         // React elements (markdown AST), not a raw string. Use message.content
         // for raw table detection instead.
