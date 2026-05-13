@@ -250,11 +250,12 @@ export default definePlugin({
         // The target call site: children:[i??(0,tA._A)(l,s),h?.isBlockedEdit&&null!=l.timestamp&&...]
         find: "isBlockedEdit&&null!=l.timestamp",
         replacement: {
-            // Match: (0,tA._A)(l,s)  — capture the (l,s) args
-            // \i matches the minified module variable (tA, or whatever the minifier picks)
-            match: /\(0,\i\._A\)\((\i),(\i)\)/,
-            // Replace: (0,$self.renderContent)(l,s) — redirect to our handler
-            replace: "(0,$self.renderContent)($1,$2)",
+            // Removing i?? — i is always undefined (nG never passes children to tS),
+            // yet the nullish coalescing was never reaching our function.
+            // Match: children:[i??(0,tA._A)(l,s),...
+            // Capture the (l,s) args for our renderContent handler.
+            match: /children:\[i\?\?\(0,\i\._A\)\((\i),(\i)\)/,
+            replace: "children:[$self.renderContent($1,$2)",
         },
     }],
 });
