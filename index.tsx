@@ -24,12 +24,18 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
 
+// Discord appends (N/M) to messages split by the 2000-char limit
+const PAGE_RE = /\s+\(\d+\/\d+\)$/;
+
+function stripPage(l: string): string {
+    return l.trim().replace(PAGE_RE, "");
+}
 function isTableRow(l: string): boolean {
-    const t = l.trim();
+    const t = stripPage(l);
     return t.startsWith("|") && t.length > 2 && (t.match(/\|/g) || []).length >= 2;
 }
 function isSeparator(l: string): boolean {
-    return /^\|[\\-\s:|]+\|$/.test(l.trim());
+    return /^\|[\\-\s:|]+\|$/.test(stripPage(l));
 }
 function splitCells(l: string): string[] {
     return l.split("|").slice(1, -1).map(c => c.trim());
@@ -44,7 +50,16 @@ function hasTableSyntax(c: string): boolean {
     return rc > 0; // Any pipe row counts as a table (including partial/single-row tables)
 }
 function parseContentBlocks(c: string): ContentBlock[] {
-    const lines = c.split("\n"); const blocks: ContentBlock[] = []; let i = 0;
+    // Strip pagination markers (Discord appends (N/M) to split messages)
+    let paginationText = "";
+    let clean = c;
+    const pageMatch = c.match(PAGE_RE);
+    if (pageMatch) {
+        paginationText = pageMatch[0].trim();
+        clean = c.slice(0, -pageMatch[0].length);
+    }
+
+    const lines = clean.split("\n"); const blocks: ContentBlock[] = []; let i = 0;
     while (i < lines.length) {
         // Code blocks: collect everything until closing ``` as one text block
         if (lines[i].trim().startsWith("```")) {
@@ -68,6 +83,7 @@ function parseContentBlocks(c: string): ContentBlock[] {
             if (t) blocks.push({ type: "text", text: t });
         }
     }
+    if (paginationText) blocks.push({ type: "text", text: paginationText });
     return blocks;
 }
 function parseSingleTable(lines: string[]): { header: string[]; body: string[][] } | null {
