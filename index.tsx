@@ -6,7 +6,8 @@
 
 import { Devs } from "@utils/constants";
 import definePlugin from "@utils/types";
-import { FluxDispatcher, findByPropsLazy } from "@webpack/common";
+import { FluxDispatcher } from "@webpack/common";
+import { findByPropsLazy } from "@webpack";
 import { React } from "@webpack/common";
 
 // Lazy resolve the MessageStore — loads after start()
