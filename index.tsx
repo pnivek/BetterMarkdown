@@ -2,8 +2,12 @@
  * Vencord, a modification for Discord's desktop app
  * Copyright (c) 2025 pnivek
  *
- * BetterMarkdown - Renders markdown tables as styled HTML below messages.
- * Uses addMessageAccessory API (verified working approach).
+ * BetterMarkdown - Renders markdown tables inline in message content.
+ *
+ * Strategy: Wraps module 291812's Ay export at runtime. The renderer
+ * accesses Ay as (0,i.Ay)(e,{...}) where i IS the exports object, so
+ * replacing exports.Ay intercepts all renderer calls. Polls for module
+ * load since start() may fire before the module is lazy-loaded.
  */
 
 import { Devs } from "@utils/constants";
@@ -16,7 +20,7 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
 
-// ─── Colors ────────────────────────────────────────────────────────
+// ─── Colors (Discord dark theme) ──────────────────────────────────
 
 const C = {
     text: "#dbdee1",
@@ -170,36 +174,77 @@ function TableComponent({ header, body }: { header: string[]; body: string[][] }
     );
 }
 
+function renderInlineContent(blocks: ContentBlock[]): React.ReactNode {
+    if (blocks.length === 1 && blocks[0].type === "text") {
+        return blocks[0].text;
+    }
+    const children: React.ReactNode[] = [];
+    for (const block of blocks) {
+        if (block.type === "text") {
+            children.push(
+                React.createElement("span", { key: children.length }, block.text)
+            );
+        } else {
+            children.push(
+                React.createElement(TableComponent, {
+                    key: children.length,
+                    header: block.header,
+                    body: block.body,
+                })
+            );
+        }
+    }
+    return React.createElement(React.Fragment, null, ...children);
+}
+
 // ─── Plugin Definition ─────────────────────────────────────────────
 
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables styled below messages",
+    description: "Renders markdown tables inline in message content by wrapping Ay at runtime",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    addMessageAccessory: "better-markdown",
+    _timer: null as any,
+    _restored: false,
 
-    renderMessageAccessory(props: any) {
-        const { message } = props;
-        if (!message?.content) return null;
+    start() {
+        this._timer = setInterval(() => {
+            try {
+                const mod = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
+                if (!mod?.Ay || this._restored) return;
 
-        const raw = message.content;
-        if (typeof raw !== "string" || !raw) return null;
-        if (!hasTableSyntax(raw)) return null;
+                const origAy = mod.Ay;
+                const self = this;
 
-        const blocks = parseContentBlocks(raw);
-        const tables = blocks.filter(b => b.type === "table");
-        if (tables.length === 0) return null;
+                mod.Ay = function (e: any, n: any) {
+                    const raw = e?.content;
+                    if (typeof raw === "string" && hasTableSyntax(raw)) {
+                        self._restored = true;
+                        clearInterval(self._timer);
+                        return {
+                            content: renderInlineContent(parseContentBlocks(raw)),
+                            hasSpoilerEmbeds: false,
+                            hasBailedAst: false,
+                        };
+                    }
+                    return origAy.call(this, e, n);
+                };
 
-        const children = tables.map((table, i) => (
-            <TableComponent
-                key={i}
-                header={(table as any).header}
-                body={(table as any).body}
-            />
-        ));
+                clearInterval(this._timer);
+                console.log("[BetterMarkdown] Ay wrapped, inline tables active");
+            } catch {}
+        }, 200);
+    },
 
-        return <>{children}</>;
+    stop() {
+        if (this._timer) {
+            clearInterval(this._timer);
+            this._timer = null;
+        }
+        try {
+            const mod = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
+            if (mod?.Ay && this._orig) mod.Ay = this._orig;
+        } catch {}
     },
 });
