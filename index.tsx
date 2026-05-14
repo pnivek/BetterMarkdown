@@ -33,6 +33,7 @@ const TABLE_ROW_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
 function isTableRow(l: string): boolean {
     const t = l.trim();
     if (!TABLE_ROW_RE.test(t)) return false;
+    // Pipes inside inline code backticks shouldn't count as table syntax
     return TABLE_ROW_RE.test(t.replace(/`[^`]*`/g, ""));
 }
 function isSeparator(l: string): boolean {
@@ -40,13 +41,29 @@ function isSeparator(l: string): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
 }
 function splitCells(l: string): string[] {
-    const raw = l.trim();
-    // Replace pipes inside backtick pairs with a placeholder before splitting,
-    // so inline code pipes aren't treated as cell boundaries
-    const masked = raw.replace(/`[^`]+`/g, m => m.replace(/\|/g, "\u00A6"));
-    const m = masked.match(TABLE_ROW_RE);
+    const m = l.trim().match(TABLE_ROW_RE);
     if (!m) return [];
-    return m[2].split("|").slice(1, -1).map(c => c.trim().replace(/\u00A6/g, "|"));
+    const struct = m[2];
+    // Walk character by character, tracking backtick state
+    // so pipes inside inline code aren't treated as cell boundaries
+    const cells: string[] = [];
+    let cell = "";
+    let inCode = false;
+    for (let i = 0; i < struct.length; i++) {
+        const ch = struct[i];
+        if (ch === "`") {
+            inCode = !inCode;
+            if (i > 0) cell += ch;
+        } else if (ch === "|" && !inCode && i > 0) {
+            cells.push(cell.trim());
+            cell = "";
+        } else if (i > 0) {
+            cell += ch;
+        }
+    }
+    const last = cell.trim();
+    if (last) cells.push(last);
+    return cells;
 }
 function hasTableSyntax(c: string): boolean {
     const lines = c.split("\n"); let rc = 0; let inCode = false;
