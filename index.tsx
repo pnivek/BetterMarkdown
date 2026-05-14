@@ -85,7 +85,8 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
         // Full table: header + separator + body
         const h = splitCells(lines[0]);
         const b = lines.slice(si + 1).map(l => splitCells(l));
-        if (b.length === 0 || b.some(r => r.length !== h.length)) return null;
+        if (h.length < 1) return null;
+        if (b.length > 0 && b.some(r => r.length !== h.length)) return null;
         return { header: h, body: b };
     }
 
