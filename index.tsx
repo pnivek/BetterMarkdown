@@ -1,8 +1,7 @@
 /*
  * BetterMarkdown - Renders markdown tables inline by intercepting
- * Flux MESSAGE_CREATE and MESSAGE_UPDATE events and setting
- * customRenderedContent on the finalized store message.
- * The renderer checks customRenderedContent before any processing.
+ * Flux MESSAGE_CREATE, MESSAGE_UPDATE, and LOAD_MESSAGES_SUCCESS
+ * events to install a reactive getter for customRenderedContent.
  */
 
 import { Devs } from "@utils/constants";
@@ -28,8 +27,7 @@ function splitCells(l: string): string[] {
     return l.split("|").slice(1, -1).map(c => c.trim());
 }
 function hasTableSyntax(c: string): boolean {
-    const lines = c.split("\n");
-    let rc = 0;
+    const lines = c.split("\n"); let rc = 0;
     for (const l of lines) {
         if (isTableRow(l)) { rc++; if (rc >= 2) return true; }
         if (rc === 1 && isSeparator(l)) return true;
@@ -37,9 +35,7 @@ function hasTableSyntax(c: string): boolean {
     return false;
 }
 function parseContentBlocks(c: string): ContentBlock[] {
-    const lines = c.split("\n");
-    const blocks: ContentBlock[] = [];
-    let i = 0;
+    const lines = c.split("\n"); const blocks: ContentBlock[] = []; let i = 0;
     while (i < lines.length) {
         if (isTableRow(lines[i])) {
             const tl: string[] = [];
@@ -60,8 +56,7 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
     if (lines.length < 2) return null;
     const si = lines.findIndex(l => isSeparator(l));
     if (si <= 0) return null;
-    const h = splitCells(lines[0]);
-    const b = lines.slice(si + 1).map(l => splitCells(l));
+    const h = splitCells(lines[0]); const b = lines.slice(si + 1).map(l => splitCells(l));
     if (b.length === 0 || b.some(r => r.length !== h.length)) return null;
     return { header: h, body: b };
 }
@@ -82,84 +77,73 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
     return React.createElement(React.Fragment, null, ...ch);
 }
 
-// Intercept table content: uses Object.defineProperty to install a reactive
-// getter on the stored message so customRenderedContent always reflects
-// the current message.content (handles MESSAGE_UPDATE automatically).
-function setCustomContent(channelIdIn: string, message: any, source: string) {
-    // Some events (MESSAGE_UPDATE) might not have channelId at top level
+// Install reactive getter on a message so customRenderedContent always
+// reflects current content (handles edits + fresh loads automatically).
+function installGetter(msg: any): boolean {
+    if (!msg?.content || typeof msg.content !== "string") return false;
+    if (!hasTableSyntax(msg.content)) return false;
+    delete msg.customRenderedContent;
+    Object.defineProperty(msg, "customRenderedContent", {
+        get() {
+            if (!this?.content || typeof this.content !== "string") return void 0;
+            if (!hasTableSyntax(this.content)) return void 0;
+            return {
+                content: renderContent(parseContentBlocks(this.content)),
+                hasSpoilerEmbeds: false,
+                hasBailedAst: false,
+            };
+        },
+        configurable: true,
+        enumerable: false,
+    });
+    return true;
+}
+
+// Handle a message or message batch from any event source
+function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
-    if (!chId) {
-        console.warn("[BM] " + source + ": no channelId available, msg", message?.id);
-        return;
-    }
-    if (!message?.content || typeof message.content !== "string") return;
+    if (!chId || !message?.content || typeof message.content !== "string") return;
     if (!hasTableSyntax(message.content)) return;
+    console.log("[BM] " + source + ": table in msg", message.id);
 
-    console.log("[BM] " + source + ": table detected in msg", message.id, "chId=" + chId);
-
-    // 1. Set on raw event data (store copies to new Message for CREATE)
+    // Set on raw event data (store copies to new Message for CREATE)
     message.customRenderedContent = {
         content: renderContent(parseContentBlocks(message.content)),
-        hasSpoilerEmbeds: false,
-        hasBailedAst: false,
+        hasSpoilerEmbeds: false, hasBailedAst: false,
     };
 
-    // 2. Install a reactive getter on the stored message so customRenderedContent
-    //    always reflects the current message.content (auto-handles MESSAGE_UPDATE).
+    // Install reactive getter on stored message
     try {
-        // Debug: log full channelId and check store state
-        console.log("[BM] " + source + ": channelId=" + chId + ", msgId=" + message.id);
-        const allChannels = MessageStore?.getMessages ? "has getMessages" : "no getMessages";
-        console.log("[BM] " + source + ": MessageStore state:", allChannels);
-
         const stored = MessageStore?.getMessage(chId, message.id);
-        console.log("[BM] " + source + ": stored msg =",
-            stored ? "found (" + stored.id + ")" : "null",
-            stored ? "content=" + (stored.content ?? "null").slice(0, 40) : "");
-        if (!stored) {
-            // Try getting messages for this channel
-            const msgs = MessageStore?.getMessages?.(chId);
-            console.log("[BM] " + source + ": msgs for channel =", msgs ? msgs.size + " messages" : "null");
-        }
-
-        if (stored && stored.content) {
-            delete stored.customRenderedContent;
-            Object.defineProperty(stored, "customRenderedContent", {
-                get() {
-                    if (!this?.content || typeof this.content !== "string") return void 0;
-                    if (!hasTableSyntax(this.content)) return void 0;
-                    return {
-                        content: renderContent(parseContentBlocks(this.content)),
-                        hasSpoilerEmbeds: false,
-                        hasBailedAst: false,
-                    };
-                },
-                configurable: true,
-                enumerable: false,
-            });
-            console.log("[BM] " + source + ": reactive getter installed on stored msg", stored.id);
+        if (stored) {
+            installGetter(stored);
+            console.log("[BM] " + source + ": getter on stored msg", stored.id);
         }
     } catch (e: any) {
         console.warn("[BM] " + source + ": getter failed:", e.message);
     }
 
-    // 3. Microtask fallback
+    // Microtask fallback for CREATE
     queueMicrotask(() => {
         try {
             const stored = MessageStore?.getMessage(chId, message.id);
             if (stored) {
                 const desc = Object.getOwnPropertyDescriptor(stored, "customRenderedContent");
-                if (!desc || desc.writable !== false) {
-                    stored.customRenderedContent = {
-                        content: renderContent(parseContentBlocks(stored.content)),
-                        hasSpoilerEmbeds: false,
-                        hasBailedAst: false,
-                    };
-                    console.log("[BM] " + source + ": microtask set on stored msg", stored.id);
-                }
+                if (!desc) { installGetter(stored); console.log("[BM] " + source + ": getter via microtask", stored.id); }
             }
         } catch {}
     });
+}
+
+// Process all messages in a channel's store (for LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT)
+function processChannel(chId: string, source: string) {
+    const msgs = MessageStore?.getMessages?.(chId);
+    if (!msgs || typeof msgs.size !== "number") return;
+    let count = 0;
+    for (const msg of msgs.values()) {
+        if (installGetter(msg)) count++;
+    }
+    if (count > 0) console.log("[BM] " + source + ": installed getters on", count, "existing msgs in channel", chId);
 }
 
 export default definePlugin({
@@ -174,11 +158,18 @@ export default definePlugin({
         console.log("[BM] start()");
         if (!FluxDispatcher) return;
         this._unsubs = [
-            FluxDispatcher.subscribe("MESSAGE_CREATE", (data: any) => {
-                setCustomContent(data.channelId, data.message, "MESSAGE_CREATE");
+            FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
+            FluxDispatcher.subscribe("MESSAGE_UPDATE", (d: any) => handleMsg(d.channelId, d.message, "UPDATE")),
+            // Install getters on all loaded messages when channel opens or scrolls back
+            FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", (d: any) => {
+                if (d.channelId && d.messages) {
+                    // d.messages is the raw API response — the store processes it
+                    processChannel(d.channelId, "LOAD");
+                }
             }),
-            FluxDispatcher.subscribe("MESSAGE_UPDATE", (data: any) => {
-                setCustomContent(data.channelId, data.message, "MESSAGE_UPDATE");
+            // Process existing messages when switching to a channel
+            FluxDispatcher.subscribe("CHANNEL_SELECT", (d: any) => {
+                if (d.channelId) processChannel(d.channelId, "SELECT");
             }),
         ];
     },
