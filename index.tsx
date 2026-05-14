@@ -12,6 +12,7 @@ import { React } from "@webpack/common";
 
 const MessageStore = findByPropsLazy("getMessage", "getMessages");
 const SelectedChannelStore = findByPropsLazy("getChannelId");
+const Parser = findByPropsLazy("parse", "parseAllowLinks");
 
 type ContentBlock =
     | { type: "text"; text: string }
@@ -64,16 +65,23 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
     return (<div style={{ marginTop: 4, marginBottom: 4, borderRadius: 8, overflow: "hidden", border: "1px solid #3f4147", background: "#2b2d31", color: "#dbdee1", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "1px solid #3f4147", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "#1e1f22" }}>{c}</th>)}</tr></thead>
-            <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "1px solid #3f4147", padding: "8px 12px", background: ri % 2 === 0 ? "#2b2d31" : "#313338" }}>{c}</td>)}</tr>)}</tbody>
+            <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "1px solid #3f4147", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "#1e1f22" }}>{Parser?.parse?.(c, true, {}) ?? c}</th>)}</tr></thead>
+            <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "1px solid #3f4147", padding: "8px 12px", background: ri % 2 === 0 ? "#2b2d31" : "#313338" }}>{Parser?.parse?.(c, true, {}) ?? c}</td>)}</tr>)}</tbody>
         </table></div>);
 }
 function renderContent(blocks: ContentBlock[]): React.ReactNode {
-    if (blocks.length === 1 && blocks[0].type === "text") return blocks[0].text;
+    // Single text block with no table — just go through Discord's parser
+    if (blocks.length === 1 && blocks[0].type === "text")
+        return Parser?.parse?.(blocks[0].text, false, {});
+
     const ch: React.ReactNode[] = [];
     for (const b of blocks) {
-        if (b.type === "text") ch.push(React.createElement("span", { key: ch.length }, b.text));
-        else ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+        if (b.type === "text") {
+            ch.push(React.createElement("span", { key: ch.length },
+                Parser?.parse?.(b.text, false, {})));
+        } else {
+            ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+        }
     }
     return React.createElement(React.Fragment, null, ...ch);
 }
