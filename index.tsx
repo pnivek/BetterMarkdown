@@ -4,7 +4,6 @@
  * events to install a reactive getter for customRenderedContent.
  */
 
-import { Devs } from "@utils/constants";
 import definePlugin from "@utils/types";
 import { FluxDispatcher } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
@@ -171,11 +170,9 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
 
 // Process all messages in a channel's store (for LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT)
 function processChannel(chId: string, source: string) {
-    console.log("[BM] " + source + ": processChannel called for chId=", chId);
     const record = MessageStore?.getMessages?.(chId);
-    console.log("[BM] " + source + ": getMessages returned", !!record, "toArray?", typeof record?.toArray);
     if (!record || typeof record.toArray !== "function") {
-        console.log("[BM] " + source + ": bailing - no record or no toArray");
+        console.warn("[BM] " + source + ": MessageStore unavailable");
         return;
     }
     const arr = record.toArray();
@@ -183,11 +180,9 @@ function processChannel(chId: string, source: string) {
     for (const msg of arr) {
         if (installGetter(msg)) count++;
     }
-    console.log("[BM] " + source + ": installed getters on", count, "of", arr.length, "msgs");
     if (count > 0) {
         try {
             MessageStore.emitChange?.();
-            console.log("[BM] " + source + ": emitChange ok");
         } catch (e) {
             console.warn("[BM] " + source + ": emitChange failed", e);
         }
@@ -207,10 +202,7 @@ export default definePlugin({
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
-            FluxDispatcher.subscribe("MESSAGE_UPDATE", (d: any) => {
-                if (d._bm) return;
-                handleMsg(d.channelId, d.message, "UPDATE");
-            }),
+            FluxDispatcher.subscribe("MESSAGE_UPDATE", (d: any) => handleMsg(d.channelId, d.message, "UPDATE")),
             FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", (d: any) => {
                 if (d.channelId) {
                     queueMicrotask(() => processChannel(d.channelId, "LOAD"));
@@ -223,7 +215,6 @@ export default definePlugin({
             }),
             FluxDispatcher.subscribe("CONNECTION_OPEN", () => {
                 const chId = SelectedChannelStore?.getChannelId?.();
-                console.log("[BM] CONNECT: chId from SelectedChannelStore=", chId);
                 if (chId) queueMicrotask(() => processChannel(chId, "CONNECT"));
             }),
         ];
