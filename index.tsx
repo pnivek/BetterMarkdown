@@ -83,9 +83,11 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
 }
 
 // Shared handler for MESSAGE_CREATE and MESSAGE_UPDATE
-function handleMessage(channelId: string, message: any) {
+function handleMessage(channelId: string, message: any, source: string) {
     if (!message?.content || typeof message.content !== "string") return;
     if (!hasTableSyntax(message.content)) return;
+
+    console.log("[BM] " + source + ": table detected in msg", message.id);
 
     // Set on raw data as immediate step
     message.customRenderedContent = {
@@ -104,6 +106,7 @@ function handleMessage(channelId: string, message: any) {
                     hasSpoilerEmbeds: false,
                     hasBailedAst: false,
                 };
+                console.log("[BM] " + source + ": set customRenderedContent on stored msg", stored.id);
             }
         } catch {}
     });
@@ -121,10 +124,10 @@ export default definePlugin({
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (data: any) => {
-                handleMessage(data.channelId, data.message);
+                handleMessage(data.channelId, data.message, "MESSAGE_CREATE");
             }),
             FluxDispatcher.subscribe("MESSAGE_UPDATE", (data: any) => {
-                handleMessage(data.channelId, data.message);
+                handleMessage(data.channelId, data.message, "MESSAGE_UPDATE");
             }),
         ];
     },
