@@ -119,7 +119,7 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
     const ch: React.ReactNode[] = [];
     for (const b of blocks) {
         if (b.type === "text") {
-            ch.push(React.createElement("span", { key: ch.length },
+            ch.push(React.createElement(React.Fragment, { key: ch.length },
                 _parse(b.text, false, {})));
         } else {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
