@@ -83,20 +83,34 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
 }
 
 // Shared handler for MESSAGE_CREATE and MESSAGE_UPDATE
-function handleMessage(channelId: string, message: any, source: string) {
+function setCustomContent(channelId: string, message: any, source: string) {
     if (!message?.content || typeof message.content !== "string") return;
     if (!hasTableSyntax(message.content)) return;
 
     console.log("[BM] " + source + ": table detected in msg", message.id);
 
-    // Set on raw data as immediate step
+    // Set on raw event data
     message.customRenderedContent = {
         content: renderContent(parseContentBlocks(message.content)),
         hasSpoilerEmbeds: false,
         hasBailedAst: false,
     };
 
-    // Run after store finishes processing: set on finalized Message object
+    // Set synchronously on stored message — store processes BEFORE our handler
+    // This is critical for MESSAGE_UPDATE where React renders before microtasks
+    try {
+        const stored = MessageStore?.getMessage(channelId, message.id);
+        if (stored) {
+            stored.customRenderedContent = {
+                content: renderContent(parseContentBlocks(stored.content)),
+                hasSpoilerEmbeds: false,
+                hasBailedAst: false,
+            };
+            console.log("[BM] " + source + ": synced to stored msg", stored.id);
+        }
+    } catch {}
+
+    // Microtask fallback
     queueMicrotask(() => {
         try {
             const stored = MessageStore?.getMessage(channelId, message.id);
@@ -106,7 +120,7 @@ function handleMessage(channelId: string, message: any, source: string) {
                     hasSpoilerEmbeds: false,
                     hasBailedAst: false,
                 };
-                console.log("[BM] " + source + ": set customRenderedContent on stored msg", stored.id);
+                console.log("[BM] " + source + ": microtask set on stored msg", stored.id);
             }
         } catch {}
     });
@@ -124,10 +138,10 @@ export default definePlugin({
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (data: any) => {
-                handleMessage(data.channelId, data.message, "MESSAGE_CREATE");
+                setCustomContent(data.channelId, data.message, "MESSAGE_CREATE");
             }),
             FluxDispatcher.subscribe("MESSAGE_UPDATE", (data: any) => {
-                handleMessage(data.channelId, data.message, "MESSAGE_UPDATE");
+                setCustomContent(data.channelId, data.message, "MESSAGE_UPDATE");
             }),
         ];
     },
