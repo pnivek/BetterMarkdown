@@ -12,7 +12,12 @@ import { React } from "@webpack/common";
 
 const MessageStore = findByPropsLazy("getMessage", "getMessages");
 const SelectedChannelStore = findByPropsLazy("getChannelId");
-const Parser = findByPropsLazy("parse", "parseAllowLinks");
+
+// Discord's markdown parser - find the module that has a parse function
+let _parse: (text: string, inline: boolean, opts: any) => any = (t) => t;
+try { const m: any = findByPropsLazy("parse", "parseAllowLinks"); if (m?.parse) _parse = (t, i, o) => m.parse(t, i, o); } catch {}
+try { const m: any = findByPropsLazy("parse"); if (m?.parse) _parse = (t, i, o) => m.parse(t, i, o); } catch {}
+// If none found, _parse remains identity fallback (text won't have markdown rendering)
 
 type ContentBlock =
     | { type: "text"; text: string }
@@ -65,20 +70,20 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
     return (<div style={{ marginTop: 4, marginBottom: 4, borderRadius: 8, overflow: "hidden", border: "1px solid #3f4147", background: "#2b2d31", color: "#dbdee1", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "1px solid #3f4147", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "#1e1f22" }}>{Parser?.parse?.(c, true, {}) ?? c}</th>)}</tr></thead>
-            <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "1px solid #3f4147", padding: "8px 12px", background: ri % 2 === 0 ? "#2b2d31" : "#313338" }}>{Parser?.parse?.(c, true, {}) ?? c}</td>)}</tr>)}</tbody>
+            <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "1px solid #3f4147", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "#1e1f22" }}>{_parse(c, true, {}) ?? c}</th>)}</tr></thead>
+            <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "1px solid #3f4147", padding: "8px 12px", background: ri % 2 === 0 ? "#2b2d31" : "#313338" }}>{_parse(c, true, {}) ?? c}</td>)}</tr>)}</tbody>
         </table></div>);
 }
 function renderContent(blocks: ContentBlock[]): React.ReactNode {
     // Single text block with no table — just go through Discord's parser
     if (blocks.length === 1 && blocks[0].type === "text")
-        return Parser?.parse?.(blocks[0].text, false, {});
+        return _parse(blocks[0].text, false, {});
 
     const ch: React.ReactNode[] = [];
     for (const b of blocks) {
         if (b.type === "text") {
             ch.push(React.createElement("span", { key: ch.length },
-                Parser?.parse?.(b.text, false, {})));
+                _parse(b.text, false, {})));
         } else {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
         }
