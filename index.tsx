@@ -8,6 +8,9 @@ import definePlugin from "@utils/types";
 import { FluxDispatcher } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 import { React } from "@webpack/common";
+import { Logger } from "@utils/Logger";
+
+const logger = new Logger("BetterMarkdown", "#a6d189");
 
 const MessageStore = findByPropsLazy("getMessage", "getMessages");
 const SelectedChannelStore = findByPropsLazy("getChannelId");
@@ -26,7 +29,7 @@ function isTableRow(l: string): boolean {
     return t.startsWith("|") && t.length > 2 && (t.match(/\|/g) || []).length >= 2;
 }
 function isSeparator(l: string): boolean {
-    return /^\|[\-\s:|]+\|$/.test(l.trim());
+    return /^\|[\\-\s:|]+\|$/.test(l.trim());
 }
 function splitCells(l: string): string[] {
     return l.split("|").slice(1, -1).map(c => c.trim());
@@ -136,7 +139,7 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
     if (!hasTableSyntax(message.content)) return;
-    console.log("[BetterMarkdown] " + source + ": table in msg", message.id);
+    logger.log(source + ": table in msg", message.id);
 
     // Set on raw event data (store copies to new Message for CREATE)
     message.customRenderedContent = {
@@ -149,10 +152,10 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
         const stored = MessageStore?.getMessage(chId, message.id);
         if (stored) {
             installGetter(stored);
-            console.log("[BetterMarkdown] " + source + ": getter on stored msg", stored.id);
+            logger.log(source + ": getter on stored msg", stored.id);
         }
     } catch (e: any) {
-        console.warn("[BetterMarkdown] " + source + ": getter failed:", e.message);
+        logger.warn(source + ": getter failed:", e.message);
     }
 
     // Microtask fallback for CREATE
@@ -161,7 +164,7 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
             const stored = MessageStore?.getMessage(chId, message.id);
             if (stored) {
                 const desc = Object.getOwnPropertyDescriptor(stored, "customRenderedContent");
-                if (!desc) { installGetter(stored); console.log("[BetterMarkdown] " + source + ": getter via microtask", stored.id); }
+                if (!desc) { installGetter(stored); logger.log(source + ": getter via microtask", stored.id); }
             }
         } catch {}
     });
@@ -171,7 +174,7 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
 function processChannel(chId: string, source: string) {
     const record = MessageStore?.getMessages?.(chId);
     if (!record || typeof record.toArray !== "function") {
-        console.warn("[BetterMarkdown] " + source + ": MessageStore unavailable");
+        logger.warn(source + ": MessageStore unavailable");
         return;
     }
     const arr = record.toArray();
@@ -183,7 +186,7 @@ function processChannel(chId: string, source: string) {
         try {
             MessageStore.emitChange?.();
         } catch (e) {
-            console.warn("[BetterMarkdown] " + source + ": emitChange failed", e);
+            logger.warn(source + ": emitChange failed", e);
         }
     }
 }
@@ -197,7 +200,7 @@ export default definePlugin({
     _unsubs: [] as any[],
 
     start() {
-        console.log("[BetterMarkdown] start()");
+        logger.log("start()");
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
