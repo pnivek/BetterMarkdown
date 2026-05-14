@@ -101,10 +101,20 @@ function setCustomContent(channelId: string, message: any, source: string) {
     // 2. Install a reactive getter on the stored message so customRenderedContent
     //    always reflects the current message.content (auto-handles MESSAGE_UPDATE).
     try {
+        // Debug: log full channelId and check store state
+        console.log("[BM] " + source + ": channelId=" + channelId + ", msgId=" + message.id);
+        const allChannels = MessageStore?.getMessages ? "has getMessages" : "no getMessages";
+        console.log("[BM] " + source + ": MessageStore state:", allChannels);
+
         const stored = MessageStore?.getMessage(channelId, message.id);
         console.log("[BM] " + source + ": stored msg =",
             stored ? "found (" + stored.id + ")" : "null",
             stored ? "content=" + (stored.content ?? "null").slice(0, 40) : "");
+        if (!stored) {
+            // Try getting messages for this channel
+            const msgs = MessageStore?.getMessages?.(channelId);
+            console.log("[BM] " + source + ": msgs for channel =", msgs ? msgs.size + " messages" : "null");
+        }
 
         if (stored && stored.content) {
             delete stored.customRenderedContent;
