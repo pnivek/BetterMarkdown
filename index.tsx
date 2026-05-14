@@ -6,8 +6,11 @@
 
 import { Devs } from "@utils/constants";
 import definePlugin from "@utils/types";
-import { FluxDispatcher } from "@webpack/common";
+import { FluxDispatcher, findByPropsLazy } from "@webpack/common";
 import { React } from "@webpack/common";
+
+// Lazy resolve the MessageStore — loads after start()
+const MessageStore = findByPropsLazy("getMessage", "getMessages");
 
 type ContentBlock =
     | { type: "text"; text: string }
@@ -93,16 +96,35 @@ export default definePlugin({
 
             this._unsub = FluxDispatcher.subscribe("MESSAGE_CREATE", (data: any) => {
                 try {
-                    const msg = data?.message;
-                    if (!msg?.content || typeof msg.content !== "string") return;
-                    if (!hasTableSyntax(msg.content)) return;
+                    const { channelId, message } = data;
+                    if (!message?.content || typeof message.content !== "string") return;
+                    if (!hasTableSyntax(message.content)) return;
 
-                    console.log("[BM] Setting customRenderedContent on msg", msg.id);
-                    msg.customRenderedContent = {
-                        content: renderContent(parseContentBlocks(msg.content)),
+                    console.log("[BM] Table msg detected, will set after store processes", message.id);
+
+                    // Set on raw data too (might work for some code paths)
+                    message.customRenderedContent = {
+                        content: renderContent(parseContentBlocks(message.content)),
                         hasSpoilerEmbeds: false,
                         hasBailedAst: false,
                     };
+
+                    // Run after store processes: set on finalized Message object
+                    queueMicrotask(() => {
+                        try {
+                            const stored = MessageStore?.getMessage(channelId, message.id);
+                            if (stored && !stored.customRenderedContent) {
+                                stored.customRenderedContent = {
+                                    content: renderContent(parseContentBlocks(stored.content)),
+                                    hasSpoilerEmbeds: false,
+                                    hasBailedAst: false,
+                                };
+                                console.log("[BM] Set customRenderedContent on stored msg", stored.id);
+                            }
+                        } catch (e2: any) {
+                            console.warn("[BM] microtask:", e2.message);
+                        }
+                    });
                 } catch (e: any) {
                     console.warn("[BM] MESSAGE_CREATE handler:", e.message);
                 }
