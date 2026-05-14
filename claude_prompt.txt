@@ -1,0 +1,45 @@
+I need you to write a Vencord plugin patch for rendering markdown tables inline in Discord messages.
+
+## Current state
+The repo is at /Users/kevin/betterMarkdown with the current code in index.tsx. The current approach patches module 291812's _A function (the content pass-through). The patch find string is "VOICE_HANGOUT_INVITE" and it replaces the function opening brace to inject a renderOutput call.
+
+THE PROBLEM: This does not work. When a user sends a table message, it still shows raw pipes. No table is rendered.
+
+## What we know (verified at runtime via Discord DevTools)
+1. Module 291812 exports: ["Ay", "_A", "sP"]
+2. The _A function actual source (verified from Vencord.Webpack.wreq.c[291812].exports._A):
+   function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?"":e.hasFlag(d.pr7.SOURCE_MESSAGE_DELETED)?p.intl.string(p.t.JOtgSw):t}
+   The function is internally named "T" but exported as "_A" on the module.exports object.
+3. There is a renderer function found by findByCode("customRenderedContent") which checks:
+   if(null!=e.customRenderedContent)return e.customRenderedContent before processing the message. So if we can SET customRenderedContent on the message object, it will use our JSX instead.
+4. Module 291812 IS loaded (confirmed by console inspection).
+5. The addMessageAccessory approach already works - the table component renders fine as an accessory. The problem is only intercepting the inline rendering.
+
+## What has FAILED so far
+1. Call-site patch (module 501440): Patching children:[i??(0,tA._A)(l,s) was fragile due to i?? short-circuit.
+2. start() function wrapping: Directly replacing mod._A with a wrapper failed because start() runs before module 291812 is lazy-loaded.
+3. after() import: @utils/patches does not export after().
+4. Current patch: Using find:"VOICE_HANGOUT_INVITE" + regex on function signature. Also fails silently.
+
+## Critical facts about Vencord system
+- In .tsx regex literals, use \i (single backslash-i). Vencord processes the regex source text directly at build time and converts \i to an identifier matcher. NOT double backslash.
+- $self in replace string becomes the plugin path at build time
+- Vencord patches work on the module FACTORY source code, before the module executes
+- The factory source might look DIFFERENT from the runtime source (different variable names in the function body)
+
+## Key insight to explore
+The fact that Vencord patches the MODULE FACTORY source (not the runtime exports) is critical. The function we see at runtime as:
+  function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?...
+might look completely different in the factory (with renamed variables). The Vencord find string searches the factory source, so "VOICE_HANGOUT_INVITE" should still be there since it's a constant property name. But the function itself might use variable names: function n(e,r){return...
+
+## Alternative approaches to consider
+1. Instead of patching _A, patch the renderer function (the one with customRenderedContent) using a different find string like "customRenderedContent" which should be unique.
+2. Use Vencord's Flux store interceptor to set customRenderedContent on messages before rendering.
+3. The customRenderedContent property check happens before _A is ever called - it's a React hook (useMessageRenderedContent). If we wrap THIS function to set customRenderedContent for table messages, it would bypass the entire _A pipeline.
+4. Maybe combine both: use patches to wrap the customRenderedContent renderer AND also patch _A as fallback.
+
+## Please
+1. Think through which approach is most likely to work
+2. Read the current index.tsx to see what's there
+3. Write the complete solution to /Users/kevin/betterMarkdown/index.tsx
+4. After writing, commit and push: git add index.tsx && git commit -m "your message" && git push origin patch-renderer --force

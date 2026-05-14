@@ -140,10 +140,24 @@ function processChannel(chId: string, source: string) {
     const msgs = MessageStore?.getMessages?.(chId);
     if (!msgs || typeof msgs.size !== "number") return;
     let count = 0;
+    const affected: any[] = [];
     for (const msg of msgs.values()) {
-        if (installGetter(msg)) count++;
+        if (installGetter(msg)) {
+            count++;
+            affected.push(msg);
+        }
     }
-    if (count > 0) console.log("[BM] " + source + ": installed getters on", count, "existing msgs in channel", chId);
+    if (count > 0) {
+        console.log("[BM] " + source + ": installed getters on", count, "existing msgs in channel", chId);
+        // Force React re-render by dispatching synthetic MESSAGE_UPDATE for each affected message
+        for (const msg of affected) {
+            FluxDispatcher.dispatch({
+                type: "MESSAGE_UPDATE",
+                message: { id: msg.id, channel_id: chId },
+                _bm: true,
+            });
+        }
+    }
 }
 
 export default definePlugin({
@@ -159,17 +173,26 @@ export default definePlugin({
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
-            FluxDispatcher.subscribe("MESSAGE_UPDATE", (d: any) => handleMsg(d.channelId, d.message, "UPDATE")),
+            FluxDispatcher.subscribe("MESSAGE_UPDATE", (d: any) => {
+                if (d._bm) return; // our own synthetic dispatch to force re-render
+                handleMsg(d.channelId, d.message, "UPDATE");
+            }),
             // Install getters on all loaded messages when channel opens or scrolls back
             FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", (d: any) => {
-                if (d.channelId && d.messages) {
-                    // d.messages is the raw API response — the store processes it
-                    processChannel(d.channelId, "LOAD");
+                if (d.channelId) {
+                    queueMicrotask(() => processChannel(d.channelId, "LOAD"));
                 }
             }),
             // Process existing messages when switching to a channel
             FluxDispatcher.subscribe("CHANNEL_SELECT", (d: any) => {
-                if (d.channelId) processChannel(d.channelId, "SELECT");
+                if (d.channelId) {
+                    queueMicrotask(() => processChannel(d.channelId, "SELECT"));
+                }
+            }),
+            // On reconnect or fresh login, process the current channel
+            FluxDispatcher.subscribe("CONNECTION_OPEN", () => {
+                const chId = MessageStore?.getChannelId?.();
+                if (chId) queueMicrotask(() => processChannel(chId, "CONNECT"));
             }),
         ];
     },
