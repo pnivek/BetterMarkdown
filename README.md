@@ -1,21 +1,23 @@
 # BetterMarkdown
 
-A [Vencord](https://vencord.dev) plugin that renders extended markdown elements inline in Discord chat messages. Handles what Discord's native markdown parser misses.
+A [Vencord](https://vencord.dev) plugin that renders GFM-style markdown tables inline in Discord messages.
 
 ## Features
 
-- **Tables** — Renders markdown tables ([GFM-style](https://github.github.com/gfm/#tables-extension-)) as styled HTML tables. Supports **multi-message table chains** (auto-detects and merges table fragments split across messages by Discord's 2000-char limit).
-- **Task lists** — *(planned)* Renders `- [ ]` / `- [x]` as interactive checkboxes.
-- **Horizontal rules** — *(planned)* Renders `---` / `***` / `___` as visible `<hr>` elements.
+- **Tables** — Renders pipe-delimited tables as styled HTML tables, inline with the message content
+- **Partial tables** — Single rows and fragments are rendered as body-only tables (no header)
+- **Edits** — Table updates live when a message is edited
+- **Old messages** — Already-sent tables render automatically on channel open and on client restart
+- **Code block awareness** — Pipe characters inside triple-backtick code blocks are ignored
+- **Theme-aware** — Uses Discord's CSS custom properties (`--background-surface-high`, `--background-base-lowest`, `--text-normal`, etc.) to match light and dark themes
 
 ## How It Works
 
-Discord's built-in markdown parser only supports a subset of the GFM spec. Tables are the biggest gap — when an AI agent (or anyone) sends a markdown table, Discord shows raw text.
+Discord exposes a property, `customRenderedContent`, on each message object. If present, the message renderer uses it instead of Discord's normal markdown parser. BetterMarkdown listens for Flux events (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `LOAD_MESSAGES_SUCCESS`, `CHANNEL_SELECT`) and installs a reactive getter for `customRenderedContent` on any message whose raw content contains pipe-delimited table rows.
 
-This plugin:
-1. Listens for messages containing table-like content
-2. Looks back through the message history to detect multi-message table chains
-3. Merges the fragments and renders a proper HTML table as a **message accessory** (appears below the original message text)
+The getter checks the message's current content on every read, so edits automatically update without any special handling. For already-loaded messages (on restart or channel switch), the plugin iterates the message store and forces a re-render via `MessageStore.emitChange()`.
+
+No modifications to Discord's markdown parser. No fragile webpack patches.
 
 ## Installation
 
@@ -34,7 +36,7 @@ pnpm inject
 
 ```bash
 cd Vencord/src/userplugins
-git clone https://github.com/pnivek/betterMarkdown betterMarkdown
+git clone https://github.com/pnivek/BetterMarkdown BetterMarkdown
 cd ../..
 pnpm build --watch
 ```
@@ -47,6 +49,8 @@ Then `Ctrl+R` in Discord to reload.
 pnpm build --watch    # auto-rebuilds on save
 # Ctrl+R in Discord to see changes
 ```
+
+Debug logs in the console are prefixed with `[BetterMarkdown]`.
 
 ## License
 
