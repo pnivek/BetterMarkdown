@@ -137,7 +137,7 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
     if (!hasTableSyntax(message.content)) return;
-    console.log("[BM] " + source + ": table in msg", message.id);
+    console.log("[betterMarkdown] " + source + ": table in msg", message.id);
 
     // Set on raw event data (store copies to new Message for CREATE)
     message.customRenderedContent = {
@@ -150,10 +150,10 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
         const stored = MessageStore?.getMessage(chId, message.id);
         if (stored) {
             installGetter(stored);
-            console.log("[BM] " + source + ": getter on stored msg", stored.id);
+            console.log("[betterMarkdown] " + source + ": getter on stored msg", stored.id);
         }
     } catch (e: any) {
-        console.warn("[BM] " + source + ": getter failed:", e.message);
+        console.warn("[betterMarkdown] " + source + ": getter failed:", e.message);
     }
 
     // Microtask fallback for CREATE
@@ -162,7 +162,7 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
             const stored = MessageStore?.getMessage(chId, message.id);
             if (stored) {
                 const desc = Object.getOwnPropertyDescriptor(stored, "customRenderedContent");
-                if (!desc) { installGetter(stored); console.log("[BM] " + source + ": getter via microtask", stored.id); }
+                if (!desc) { installGetter(stored); console.log("[betterMarkdown] " + source + ": getter via microtask", stored.id); }
             }
         } catch {}
     });
@@ -172,7 +172,7 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
 function processChannel(chId: string, source: string) {
     const record = MessageStore?.getMessages?.(chId);
     if (!record || typeof record.toArray !== "function") {
-        console.warn("[BM] " + source + ": MessageStore unavailable");
+        console.warn("[betterMarkdown] " + source + ": MessageStore unavailable");
         return;
     }
     const arr = record.toArray();
@@ -184,7 +184,7 @@ function processChannel(chId: string, source: string) {
         try {
             MessageStore.emitChange?.();
         } catch (e) {
-            console.warn("[BM] " + source + ": emitChange failed", e);
+            console.warn("[betterMarkdown] " + source + ": emitChange failed", e);
         }
     }
 }
@@ -198,7 +198,7 @@ export default definePlugin({
     _unsubs: [] as any[],
 
     start() {
-        console.log("[BM] start()");
+        console.log("[betterMarkdown] start()");
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
