@@ -11,6 +11,7 @@ import { findByPropsLazy } from "@webpack";
 import { React } from "@webpack/common";
 
 const MessageStore = findByPropsLazy("getMessage", "getMessages");
+const SelectedChannelStore = findByPropsLazy("getChannelId");
 
 type ContentBlock =
     | { type: "text"; text: string }
@@ -138,29 +139,25 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
 // Process all messages in a channel's store (for LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT)
 function processChannel(chId: string, source: string) {
     console.log("[BM] " + source + ": processChannel called for chId=", chId);
-    const msgs = MessageStore?.getMessages?.(chId);
-    console.log("[BM] " + source + ": getMessages returned", !!msgs, "size=", msgs?.size, "type=", typeof msgs?.size);
-    if (!msgs || typeof msgs.size !== "number") {
-        console.log("[BM] " + source + ": bailing - no messages or invalid size");
+    const record = MessageStore?.getMessages?.(chId);
+    console.log("[BM] " + source + ": getMessages returned", !!record, "toArray?", typeof record?.toArray);
+    if (!record || typeof record.toArray !== "function") {
+        console.log("[BM] " + source + ": bailing - no record or no toArray");
         return;
     }
+    const arr = record.toArray();
     let count = 0;
-    const affected: any[] = [];
-    for (const msg of msgs.values()) {
-        if (installGetter(msg)) {
-            count++;
-            affected.push(msg);
-        }
+    for (const msg of arr) {
+        if (installGetter(msg)) count++;
     }
-    console.log("[BM] " + source + ": found", count, "table msgs out of", msgs.size, "total");
+    console.log("[BM] " + source + ": installed getters on", count, "of", arr.length, "msgs");
     if (count > 0) {
-        // Force React re-render by dispatching synthetic MESSAGE_UPDATE for each affected message
-        for (const msg of affected) {
-            FluxDispatcher.dispatch({
-                type: "MESSAGE_UPDATE",
-                message: { id: msg.id, channel_id: chId },
-                _bm: true,
-            });
+        // Force store to re-emit so React re-renders messages
+        try {
+            MessageStore.emitChange?.();
+            console.log("[BM] " + source + ": emitChange ok");
+        } catch (e) {
+            console.warn("[BM] " + source + ": emitChange failed", e);
         }
     }
 }
@@ -196,7 +193,8 @@ export default definePlugin({
             }),
             // On reconnect or fresh login, process the current channel
             FluxDispatcher.subscribe("CONNECTION_OPEN", () => {
-                const chId = MessageStore?.getChannelId?.();
+                const chId = SelectedChannelStore?.getChannelId?.();
+                console.log("[BM] CONNECT: chId from SelectedChannelStore=", chId);
                 if (chId) queueMicrotask(() => processChannel(chId, "CONNECT"));
             }),
         ];
