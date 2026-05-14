@@ -2,29 +2,8 @@
  * Vencord, a modification for Discord's desktop app
  * Copyright (c) 2025 pnivek
  *
- * BetterMarkdown - Renders markdown tables inline in message content.
- *
- * Two patches, layered for robustness:
- *
- *   1. The useMessageRenderedContent-style hook in the module containing
- *      "customRenderedContent". This hook early-returns
- *        if (null != msg.customRenderedContent) return msg.customRenderedContent
- *      before any markdown processing. Injecting our check right before that
- *      line short-circuits the entire pipeline when we have a table.
- *
- *   2. The _A function in module 291812 ("VOICE_HANGOUT_INVITE"). Verified
- *      runtime source:
- *        function T(e,t){return e.type===d.lAJ.VOICE_HANGOUT_INVITE?"":
- *          e.hasFlag(d.pr7.SOURCE_MESSAGE_DELETED)?p.intl.string(p.t.JOtgSw):t}
- *      This is the final content pass-through. We wrap it so that if the
- *      hook patch didn't fire (different code path, different Discord build,
- *      etc.), we still intercept here.
- *
- * Both patches use \i (single backslash + i) in regex literals. Vencord
- * processes regex.source at build time and converts \i to an identifier
- * matcher. We anchor each match on a unique string from the body (the
- * literal property "customRenderedContent" / "VOICE_HANGOUT_INVITE") so
- * minified variable renaming in the factory does not break us.
+ * BetterMarkdown - Renders markdown tables as styled HTML below messages.
+ * Uses addMessageAccessory API (verified working approach).
  */
 
 import { Devs } from "@utils/constants";
@@ -37,7 +16,7 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
 
-// ─── Colors (Discord dark theme) ──────────────────────────────────
+// ─── Colors ────────────────────────────────────────────────────────
 
 const C = {
     text: "#dbdee1",
@@ -191,88 +170,36 @@ function TableComponent({ header, body }: { header: string[]; body: string[][] }
     );
 }
 
-function renderInlineContent(blocks: ContentBlock[]): React.ReactNode {
-    if (blocks.length === 1 && blocks[0].type === "text") {
-        return blocks[0].text;
-    }
-
-    const children: React.ReactNode[] = [];
-    for (const block of blocks) {
-        if (block.type === "text") {
-            children.push(
-                React.createElement("span", { key: children.length }, block.text)
-            );
-        } else {
-            children.push(
-                React.createElement(TableComponent, {
-                    key: children.length,
-                    header: block.header,
-                    body: block.body,
-                })
-            );
-        }
-    }
-    return React.createElement(React.Fragment, null, ...children);
-}
-
 // ─── Plugin Definition ─────────────────────────────────────────────
 
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables inline in message content",
+    description: "Renders markdown tables styled below messages",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    // Called from both patch sites. Both pass `message` as first arg; the
-    // _A wrapper passes the rendered-content fallback as second arg, which
-    // we don't currently use. Returns ReactNode for tables, undefined for
-    // everything else (so the host pipeline continues unchanged).
-    renderOutput(message: any, _content?: any): any {
-        if (!message || typeof message !== "object") return void 0;
+    addMessageAccessory: "better-markdown",
+
+    renderMessageAccessory(props: any) {
+        const { message } = props;
+        if (!message?.content) return null;
+
         const raw = message.content;
-        if (typeof raw !== "string" || !raw) return void 0;
-        if (!hasTableSyntax(raw)) return void 0;
+        if (typeof raw !== "string" || !raw) return null;
+        if (!hasTableSyntax(raw)) return null;
+
         const blocks = parseContentBlocks(raw);
-        return renderInlineContent(blocks);
+        const tables = blocks.filter(b => b.type === "table");
+        if (tables.length === 0) return null;
+
+        const children = tables.map((table, i) => (
+            <TableComponent
+                key={i}
+                header={(table as any).header}
+                body={(table as any).body}
+            />
+        ));
+
+        return <>{children}</>;
     },
-
-    patches: [
-        // ── Patch 1: the customRenderedContent early-return hook ──
-        //
-        // Matches:   if(null!=X.customRenderedContent)return X.customRenderedContent
-        // Becomes:   var __vbm=$self.renderOutput(X);
-        //            if(__vbm!==void 0)return __vbm;
-        //            if(null!=X.customRenderedContent)return X.customRenderedContent
-        //
-        // X is captured as \1 so the back-reference inside the same match
-        // forces both occurrences to be the same identifier.
-        {
-            find: "customRenderedContent",
-            replacement: {
-                match: /if\(null!=(\i)\.customRenderedContent\)return \1\.customRenderedContent/,
-                replace: "var __vbm=$self.renderOutput($1);if(__vbm!==void 0)return __vbm;$&",
-            },
-        },
-
-        // ── Patch 2: the _A function in module 291812 ──
-        //
-        // Anchored on the unique tail
-        //   "function <name?>(<msg>,<content>){return <msg>.type===<ns>.VOICE_HANGOUT_INVITE"
-        // so we match regardless of minified function/param names. We capture
-        // the namespace chain leading to .VOICE_HANGOUT_INVITE ($4) and splice
-        // it back so the original return tail still parses.
-        //
-        // Capture groups:
-        //   $1 = optional " <name>" of the function (may be empty)
-        //   $2 = first param identifier (the message)
-        //   $3 = second param identifier (the upstream rendered content)
-        //   $4 = namespace chain ending in a dot, e.g. "d.lAJ."
-        {
-            find: "VOICE_HANGOUT_INVITE",
-            replacement: {
-                match: /function((?:\s+\i)?)\((\i),(\i)\)\{return \2\.type===((?:\i\.)+)VOICE_HANGOUT_INVITE/,
-                replace: "function$1($2,$3){var __vbm=$self.renderOutput($2,$3);if(__vbm!==void 0)return __vbm;return $2.type===$4VOICE_HANGOUT_INVITE",
-            },
-        },
-    ],
 });
