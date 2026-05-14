@@ -80,24 +80,52 @@ export default definePlugin({
             const m = (Vencord.Webpack.wreq.c as any)[291812]?.exports;
             if (!m?._A) { console.warn("[BM] _A not found"); return; }
 
-            const orig = m._A;
-            console.log("[BM] _A:", orig.toString().slice(0, 80));
+            const origA = m._A;
+            const origAy = m.Ay;
+            console.log("[BM] orig _A:", origA.toString().slice(0, 80));
+            console.log("[BM] orig Ay:", typeof origAy, origAy ? "exists" : "no");
 
             // _A is a getter-only property — must use defineProperty
+            // We wrap BOTH _A and Ay since _A may be called internally via closure
+            // while Ay is called externally via the exports object
+
+            // Wrap _A (may be called internally by Ay via closure - lower chance of working)
             Object.defineProperty(m, "_A", {
                 get() {
-                    const wrapped = function(this: any, e: any, t: any) {
+                    const wrapped = function (this: any, e: any, t: any) {
                         const raw = e?.content;
                         if (typeof raw === "string" && hasTableSyntax(raw)) {
-                            console.log("[BM] table!", e.id);
+                            console.log("[BM] _A wrapper: table!", e?.id);
                             return renderContent(parseContentBlocks(raw));
                         }
-                        return orig.call(this, e, t);
+                        return origA.call(this, e, t);
                     };
                     return wrapped;
                 },
                 configurable: true,
             });
+
+            // Wrap Ay (called by renderer via exports object — higher chance of working)
+            if (typeof origAy === "function") {
+                Object.defineProperty(m, "Ay", {
+                    get() {
+                        const wrapped = function (this: any, e: any, n: any) {
+                            const raw = e?.content;
+                            if (typeof raw === "string" && hasTableSyntax(raw)) {
+                                console.log("[BM] Ay wrapper: table!", e?.id);
+                                return {
+                                    content: renderContent(parseContentBlocks(raw)),
+                                    hasSpoilerEmbeds: false,
+                                    hasBailedAst: false,
+                                };
+                            }
+                            return origAy.call(this, e, n);
+                        };
+                        return wrapped;
+                    },
+                    configurable: true,
+                });
+            }
 
             console.log("[BM] _A redefined via defineProperty");
         } catch (ex: any) {
