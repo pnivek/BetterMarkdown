@@ -64,9 +64,20 @@ function parseContentBlocks(c: string): ContentBlock[] {
         }
         if (isTableRow(lines[i])) {
             const tl: string[] = [];
-            while (i < lines.length && isTableRow(lines[i])) { tl.push(lines[i].trim()); i++; }
+            const trailing: string[] = [];
+            while (i < lines.length && isTableRow(lines[i])) {
+                const raw = lines[i].trim();
+                tl.push(raw);
+                const m = raw.match(TABLE_ROW_RE);
+                if (m?.[2]?.trim()) trailing.push(m[2].trim());
+                i++;
+            }
             const p = parseSingleTable(tl);
-            if (p) blocks.push({ type: "table", header: p.header, body: p.body });
+            if (p) {
+                blocks.push({ type: "table", header: p.header, body: p.body });
+                if (trailing.length > 0)
+                    blocks.push({ type: "text", text: trailing.join(" ") });
+            }
             else blocks.push({ type: "text", text: tl.join("\n") });
         } else {
             const tl: string[] = [];
