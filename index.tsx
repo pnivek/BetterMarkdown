@@ -25,7 +25,7 @@ type ContentBlock =
 
 function isTableRow(l: string): boolean {
     const t = l.trim();
-    return t.startsWith("|") && t.endsWith("|") && t.length > 2;
+    return t.startsWith("|") && t.length > 2 && (t.match(/\|/g) || []).length >= 2;
 }
 function isSeparator(l: string): boolean {
     return /^\|[\-\s:|]+\|$/.test(l.trim());
