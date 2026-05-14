@@ -82,45 +82,65 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
     return React.createElement(React.Fragment, null, ...ch);
 }
 
-// Shared handler for MESSAGE_CREATE and MESSAGE_UPDATE
+// Intercept table content: uses Object.defineProperty to install a reactive
+// getter on the stored message so customRenderedContent always reflects
+// the current message.content (handles MESSAGE_UPDATE automatically).
 function setCustomContent(channelId: string, message: any, source: string) {
     if (!message?.content || typeof message.content !== "string") return;
     if (!hasTableSyntax(message.content)) return;
 
     console.log("[BM] " + source + ": table detected in msg", message.id);
 
-    // Set on raw event data
+    // 1. Set on raw event data (store copies to new Message for CREATE)
     message.customRenderedContent = {
         content: renderContent(parseContentBlocks(message.content)),
         hasSpoilerEmbeds: false,
         hasBailedAst: false,
     };
 
-    // Set synchronously on stored message — store processes BEFORE our handler
-    // This is critical for MESSAGE_UPDATE where React renders before microtasks
+    // 2. Install a reactive getter on the stored message so customRenderedContent
+    //    always reflects the current message.content (auto-handles MESSAGE_UPDATE).
     try {
         const stored = MessageStore?.getMessage(channelId, message.id);
-        if (stored) {
-            stored.customRenderedContent = {
-                content: renderContent(parseContentBlocks(stored.content)),
-                hasSpoilerEmbeds: false,
-                hasBailedAst: false,
-            };
-            console.log("[BM] " + source + ": synced to stored msg", stored.id);
-        }
-    } catch {}
+        console.log("[BM] " + source + ": stored msg =",
+            stored ? "found (" + stored.id + ")" : "null",
+            stored ? "content=" + (stored.content ?? "null").slice(0, 40) : "");
 
-    // Microtask fallback
+        if (stored && stored.content) {
+            delete stored.customRenderedContent;
+            Object.defineProperty(stored, "customRenderedContent", {
+                get() {
+                    if (!this?.content || typeof this.content !== "string") return void 0;
+                    if (!hasTableSyntax(this.content)) return void 0;
+                    return {
+                        content: renderContent(parseContentBlocks(this.content)),
+                        hasSpoilerEmbeds: false,
+                        hasBailedAst: false,
+                    };
+                },
+                configurable: true,
+                enumerable: false,
+            });
+            console.log("[BM] " + source + ": reactive getter installed on stored msg", stored.id);
+        }
+    } catch (e: any) {
+        console.warn("[BM] " + source + ": getter failed:", e.message);
+    }
+
+    // 3. Microtask fallback
     queueMicrotask(() => {
         try {
             const stored = MessageStore?.getMessage(channelId, message.id);
-            if (stored && !stored.customRenderedContent) {
-                stored.customRenderedContent = {
-                    content: renderContent(parseContentBlocks(stored.content)),
-                    hasSpoilerEmbeds: false,
-                    hasBailedAst: false,
-                };
-                console.log("[BM] " + source + ": microtask set on stored msg", stored.id);
+            if (stored) {
+                const desc = Object.getOwnPropertyDescriptor(stored, "customRenderedContent");
+                if (!desc || desc.writable !== false) {
+                    stored.customRenderedContent = {
+                        content: renderContent(parseContentBlocks(stored.content)),
+                        hasSpoilerEmbeds: false,
+                        hasBailedAst: false,
+                    };
+                    console.log("[BM] " + source + ": microtask set on stored msg", stored.id);
+                }
             }
         } catch {}
     });
@@ -135,6 +155,7 @@ export default definePlugin({
     _unsubs: [] as any[],
 
     start() {
+        console.log("[BM] start()");
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (data: any) => {
