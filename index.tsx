@@ -81,17 +81,17 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
         return { header: h, body: b };
     }
 
-    // No separator: first row is header, rest are body (partial table)
-    const h = splitCells(lines[0]);
-    if (h.length < 2) return null;
-    const b = lines.slice(1).map(l => splitCells(l));
-    if (b.length > 0 && b.some(r => r.length !== h.length)) return null;
-    return { header: h, body: b };
+    // No separator: all rows are body (partial table continuation)
+    const cellCount = splitCells(lines[0]).length;
+    if (cellCount < 2) return null;
+    const b = lines.map(l => splitCells(l));
+    if (b.some(r => r.length !== cellCount)) return null;
+    return { header: [], body: b };
 }
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
     return (<div style={{ marginTop: 4, marginBottom: 4, borderRadius: 8, overflow: "hidden", border: "1px solid #3f4147", background: "#2b2d31", color: "#dbdee1", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "1px solid #3f4147", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "#1e1f22" }}>{_parse(c, true, {}) ?? c}</th>)}</tr></thead>
+            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "1px solid #3f4147", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "#1e1f22" }}>{_parse(c, true, {}) ?? c}</th>)}</tr></thead>}
             {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "1px solid #3f4147", padding: "8px 12px", background: ri % 2 === 0 ? "#2b2d31" : "#313338" }}>{_parse(c, true, {}) ?? c}</td>)}</tr>)}</tbody>}
         </table></div>);
 }
