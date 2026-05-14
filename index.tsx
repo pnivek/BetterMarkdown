@@ -24,10 +24,11 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
 
-// Regex that captures the clean pipe structure and any trailing content
-// Group 1: the complete pipe-delimited structure (starts and ends with |)
-// Group 2: trailing text after the last pipe (pagination markers, etc.)
-const TABLE_ROW_RE = /^(\|(?:[^|]+\|)+)(.*)$/;
+// Regex that captures the clean pipe structure and any surrounding content
+// Group 1: leading text before the table structure
+// Group 2: the clean pipe-delimited structure (starts and ends with |)
+// Group 3: trailing text after the table structure
+const TABLE_ROW_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
 
 function isTableRow(l: string): boolean {
     return TABLE_ROW_RE.test(l.trim());
@@ -39,7 +40,7 @@ function isSeparator(l: string): boolean {
 function splitCells(l: string): string[] {
     const m = l.trim().match(TABLE_ROW_RE);
     if (!m) return [];
-    return m[1].split("|").slice(1, -1).map(c => c.trim());
+    return m[2].split("|").slice(1, -1).map(c => c.trim());
 }
 function hasTableSyntax(c: string): boolean {
     const lines = c.split("\n"); let rc = 0; let inCode = false;
@@ -64,16 +65,21 @@ function parseContentBlocks(c: string): ContentBlock[] {
         }
         if (isTableRow(lines[i])) {
             const tl: string[] = [];
+            const leading: string[] = [];
             const trailing: string[] = [];
             while (i < lines.length && isTableRow(lines[i])) {
                 const raw = lines[i].trim();
-                tl.push(raw);
                 const m = raw.match(TABLE_ROW_RE);
-                if (m?.[2]?.trim()) trailing.push(m[2].trim());
+                // Only capture leading text from the first row of the table block
+                if (tl.length === 0 && m?.[1]?.trim()) leading.push(m[1].trim());
+                tl.push(raw);
+                if (m?.[3]?.trim()) trailing.push(m[3].trim());
                 i++;
             }
             const p = parseSingleTable(tl);
             if (p) {
+                if (leading.length > 0)
+                    blocks.push({ type: "text", text: leading.join(" ") });
                 blocks.push({ type: "table", header: p.header, body: p.body });
                 if (trailing.length > 0)
                     blocks.push({ type: "text", text: trailing.join(" ") });
