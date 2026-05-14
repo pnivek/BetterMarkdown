@@ -28,7 +28,7 @@ function isTableRow(l: string): boolean {
     return t.startsWith("|") && t.endsWith("|") && t.length > 2;
 }
 function isSeparator(l: string): boolean {
-    return /^\|[\\s\\-:|]+\|$/.test(l.trim());
+    return /^\|[\-\s:|]+\|$/.test(l.trim());
 }
 function splitCells(l: string): string[] {
     return l.split("|").slice(1, -1).map(c => c.trim());
