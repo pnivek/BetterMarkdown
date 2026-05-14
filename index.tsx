@@ -137,8 +137,13 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
 
 // Process all messages in a channel's store (for LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT)
 function processChannel(chId: string, source: string) {
+    console.log("[BM] " + source + ": processChannel called for chId=", chId);
     const msgs = MessageStore?.getMessages?.(chId);
-    if (!msgs || typeof msgs.size !== "number") return;
+    console.log("[BM] " + source + ": getMessages returned", !!msgs, "size=", msgs?.size, "type=", typeof msgs?.size);
+    if (!msgs || typeof msgs.size !== "number") {
+        console.log("[BM] " + source + ": bailing - no messages or invalid size");
+        return;
+    }
     let count = 0;
     const affected: any[] = [];
     for (const msg of msgs.values()) {
@@ -147,8 +152,8 @@ function processChannel(chId: string, source: string) {
             affected.push(msg);
         }
     }
+    console.log("[BM] " + source + ": found", count, "table msgs out of", msgs.size, "total");
     if (count > 0) {
-        console.log("[BM] " + source + ": installed getters on", count, "existing msgs in channel", chId);
         // Force React re-render by dispatching synthetic MESSAGE_UPDATE for each affected message
         for (const msg of affected) {
             FluxDispatcher.dispatch({
