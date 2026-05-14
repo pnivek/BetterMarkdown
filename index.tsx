@@ -14,7 +14,6 @@ const SelectedChannelStore = findByPropsLazy("getChannelId");
 
 // Discord's markdown parser - find the module that has a parse function
 let _parse: (text: string, inline: boolean, opts: any) => any = (t) => t;
-try { const m: any = findByPropsLazy("parse", "parseAllowLinks"); if (m?.parse) _parse = (t, i, o) => m.parse(t, i, o); } catch {}
 try { const m: any = findByPropsLazy("parse"); if (m?.parse) _parse = (t, i, o) => m.parse(t, i, o); } catch {}
 // If none found, _parse remains identity fallback (text won't have markdown rendering)
 
