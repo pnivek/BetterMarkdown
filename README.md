@@ -13,9 +13,9 @@ A [Vencord](https://vencord.dev) plugin that renders GFM-style markdown tables i
 
 ## How It Works
 
-Discord exposes a property, `customRenderedContent`, on each message object. If present, the message renderer uses it instead of Discord's normal markdown parser. BetterMarkdown listens for Flux events (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `LOAD_MESSAGES_SUCCESS`, `CHANNEL_SELECT`) and installs a reactive getter for `customRenderedContent` on any message whose raw content contains pipe-delimited table rows.
+Discord exposes a property, `customRenderedContent`, on each message object. If present the message renderer uses it instead of Discord's normal markdown parser. BetterMarkdown listens for Flux events (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `LOAD_MESSAGES_SUCCESS`, `CHANNEL_SELECT`) and installs a reactive getter for `customRenderedContent` on any message whose raw content contains pipe-delimited table rows.
 
-The getter checks the message's current content on every read, so edits automatically update without any special handling. For already-loaded messages (on restart or channel switch), the plugin iterates the message store and forces a re-render via `MessageStore.emitChange()`.
+The getter checks the message's current content on every read, so edits automatically update without any special handling. For already-loaded messages (on restart or channel switch) the plugin iterates the message store and forces a re-render via `MessageStore.emitChange()`.
 
 No modifications to Discord's markdown parser. No fragile webpack patches.
 
@@ -38,7 +38,7 @@ pnpm inject
 cd Vencord/src/userplugins
 git clone https://github.com/pnivek/BetterMarkdown BetterMarkdown
 cd ../..
-pnpm build --watch
+pnpm build
 ```
 
 Then `Ctrl+R` in Discord to reload.
