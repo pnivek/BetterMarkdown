@@ -88,10 +88,10 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
     return { header: [], body: b };
 }
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
-    return (<div style={{ marginTop: 4, marginBottom: 4, borderRadius: 8, overflow: "hidden", border: "1px solid var(--background-secondary-alt)", background: "var(--background-secondary)", color: "var(--text-normal)", maxWidth: "100%" }}>
+    return (<div style={{ marginTop: 4, marginBottom: 4, borderRadius: 8, overflow: "hidden", border: "2px solid var(--background-secondary-alt)", background: "var(--background-secondary)", color: "var(--text-normal)", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "1px solid var(--background-secondary-alt)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-secondary-alt)" }}>{_parse(c, true, {}) ?? c}</th>)}</tr></thead>}
-            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "1px solid var(--background-secondary-alt)", padding: "8px 12px", background: ri % 2 === 0 ? "var(--background-secondary)" : "var(--background-primary)" }}>{_parse(c, true, {}) ?? c}</td>)}</tr>)}</tbody>}
+            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-secondary-alt)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-secondary-alt)" }}>{_parse(c, true, {}) ?? c}</th>)}</tr></thead>}
+            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-secondary-alt)", padding: "8px 12px", background: ri % 2 === 0 ? "var(--background-secondary)" : "var(--background-primary)" }}>{_parse(c, true, {}) ?? c}</td>)}</tr>)}</tbody>}
         </table></div>);
 }
 function renderContent(blocks: ContentBlock[]): React.ReactNode {
