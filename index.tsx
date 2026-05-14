@@ -85,11 +85,17 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
 // Intercept table content: uses Object.defineProperty to install a reactive
 // getter on the stored message so customRenderedContent always reflects
 // the current message.content (handles MESSAGE_UPDATE automatically).
-function setCustomContent(channelId: string, message: any, source: string) {
+function setCustomContent(channelIdIn: string, message: any, source: string) {
+    // Some events (MESSAGE_UPDATE) might not have channelId at top level
+    const chId = channelIdIn || message?.channel_id;
+    if (!chId) {
+        console.warn("[BM] " + source + ": no channelId available, msg", message?.id);
+        return;
+    }
     if (!message?.content || typeof message.content !== "string") return;
     if (!hasTableSyntax(message.content)) return;
 
-    console.log("[BM] " + source + ": table detected in msg", message.id);
+    console.log("[BM] " + source + ": table detected in msg", message.id, "chId=" + chId);
 
     // 1. Set on raw event data (store copies to new Message for CREATE)
     message.customRenderedContent = {
@@ -102,17 +108,17 @@ function setCustomContent(channelId: string, message: any, source: string) {
     //    always reflects the current message.content (auto-handles MESSAGE_UPDATE).
     try {
         // Debug: log full channelId and check store state
-        console.log("[BM] " + source + ": channelId=" + channelId + ", msgId=" + message.id);
+        console.log("[BM] " + source + ": channelId=" + chId + ", msgId=" + message.id);
         const allChannels = MessageStore?.getMessages ? "has getMessages" : "no getMessages";
         console.log("[BM] " + source + ": MessageStore state:", allChannels);
 
-        const stored = MessageStore?.getMessage(channelId, message.id);
+        const stored = MessageStore?.getMessage(chId, message.id);
         console.log("[BM] " + source + ": stored msg =",
             stored ? "found (" + stored.id + ")" : "null",
             stored ? "content=" + (stored.content ?? "null").slice(0, 40) : "");
         if (!stored) {
             // Try getting messages for this channel
-            const msgs = MessageStore?.getMessages?.(channelId);
+            const msgs = MessageStore?.getMessages?.(chId);
             console.log("[BM] " + source + ": msgs for channel =", msgs ? msgs.size + " messages" : "null");
         }
 
@@ -140,7 +146,7 @@ function setCustomContent(channelId: string, message: any, source: string) {
     // 3. Microtask fallback
     queueMicrotask(() => {
         try {
-            const stored = MessageStore?.getMessage(channelId, message.id);
+            const stored = MessageStore?.getMessage(chId, message.id);
             if (stored) {
                 const desc = Object.getOwnPropertyDescriptor(stored, "customRenderedContent");
                 if (!desc || desc.writable !== false) {
