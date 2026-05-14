@@ -19,6 +19,9 @@ try { const m: any = findByPropsLazy("parse", "parseAllowLinks"); if (m?.parse) 
 try { const m: any = findByPropsLazy("parse"); if (m?.parse) _parse = (t, i, o) => m.parse(t, i, o); } catch {}
 // If none found, _parse remains identity fallback (text won't have markdown rendering)
 
+// Multi-message table continuations: firstMsgId -> continuation content[]
+const _tableContinuations = new Map<string, string[]>();
+
 type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
@@ -28,14 +31,16 @@ function isTableRow(l: string): boolean {
     return t.startsWith("|") && t.endsWith("|") && t.length > 2;
 }
 function isSeparator(l: string): boolean {
-    return /^\|[\s\-:|]+\|$/.test(l.trim());
+    return /^\|[\\s\\-:|]+\|$/.test(l.trim());
 }
 function splitCells(l: string): string[] {
     return l.split("|").slice(1, -1).map(c => c.trim());
 }
 function hasTableSyntax(c: string): boolean {
-    const lines = c.split("\n"); let rc = 0;
+    const lines = c.split("\n"); let rc = 0; let inCode = false;
     for (const l of lines) {
+        if (l.trim().startsWith("```")) { inCode = !inCode; continue; }
+        if (inCode) continue;
         if (isTableRow(l)) { rc++; if (rc >= 2) return true; }
         if (rc === 1 && isSeparator(l)) return true;
     }
@@ -44,6 +49,15 @@ function hasTableSyntax(c: string): boolean {
 function parseContentBlocks(c: string): ContentBlock[] {
     const lines = c.split("\n"); const blocks: ContentBlock[] = []; let i = 0;
     while (i < lines.length) {
+        // Code blocks: collect everything until closing ``` as one text block
+        if (lines[i].trim().startsWith("```")) {
+            const codeLines: string[] = [lines[i]];
+            i++;
+            while (i < lines.length && !lines[i].trim().startsWith("```")) { codeLines.push(lines[i]); i++; }
+            if (i < lines.length) { codeLines.push(lines[i]); i++; } // closing ```
+            blocks.push({ type: "text", text: codeLines.join("\n") });
+            continue;
+        }
         if (isTableRow(lines[i])) {
             const tl: string[] = [];
             while (i < lines.length && isTableRow(lines[i])) { tl.push(lines[i].trim()); i++; }
@@ -52,7 +66,7 @@ function parseContentBlocks(c: string): ContentBlock[] {
             else blocks.push({ type: "text", text: tl.join("\n") });
         } else {
             const tl: string[] = [];
-            while (i < lines.length && !isTableRow(lines[i])) { tl.push(lines[i]); i++; }
+            while (i < lines.length && !isTableRow(lines[i]) && !lines[i].trim().startsWith("```")) { tl.push(lines[i]); i++; }
             const t = tl.join("\n").trim();
             if (t) blocks.push({ type: "text", text: t });
         }
@@ -66,6 +80,28 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
     const h = splitCells(lines[0]); const b = lines.slice(si + 1).map(l => splitCells(l));
     if (b.length === 0 || b.some(r => r.length !== h.length)) return null;
     return { header: h, body: b };
+}
+// Walk backward from a message to find the first message of a multi-message table chain
+function findChainStart(msgId: string, chId: string): string | null {
+    const record = MessageStore?.getMessages?.(chId);
+    if (!record || typeof record.toArray !== "function") return null;
+    const arr = record.toArray();
+    const idx = arr.findIndex(m => m.id === msgId);
+    if (idx <= 0) return null;
+    // Walk backward to find the first message that starts a table chain
+    let start = idx;
+    for (let j = idx - 1; j >= 0; j--) {
+        const prev = arr[j].content;
+        if (!prev || typeof prev !== "string") break;
+        const pipeLines = prev.split("\n").filter(l => l.trim().startsWith("|"));
+        if (pipeLines.length === 0) break;
+        start = j;
+    }
+    if (start >= idx) return null; // no prior table-like message
+    // Verify the combined chain (start to current) forms a valid table
+    const combined = arr.slice(start, idx + 1).map(m => m.content).join("\n");
+    if (!hasTableSyntax(combined)) return null;
+    return arr[start].id;
 }
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
     return (<div style={{ marginTop: 4, marginBottom: 4, borderRadius: 8, overflow: "hidden", border: "1px solid #3f4147", background: "#2b2d31", color: "#dbdee1", maxWidth: "100%" }}>
@@ -91,6 +127,47 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
     return React.createElement(React.Fragment, null, ...ch);
 }
 
+// Get content for rendering - merges multi-message table continuations
+function getRenderContent(msg: any): string {
+    let content = msg.content;
+    if (!content || typeof content !== "string") return "";
+
+    // Check if this message has table continuations registered (it's the chain starter)
+    const conts = _tableContinuations.get(msg.id);
+    if (conts && conts.length > 0) {
+        content = content + "\n" + conts.join("\n");
+    }
+
+    // If this message doesn't have table syntax but is a table fragment,
+    // check if it's part of a multi-message chain
+    if (!hasTableSyntax(content) && content.split("\n").some(l => l.trim().startsWith("|"))) {
+        const chId = msg.channel_id;
+        if (chId) {
+            const startId = findChainStart(msg.id, chId);
+            if (startId) {
+                // Register this message as a continuation of the chain starter
+                if (!_tableContinuations.has(startId)) _tableContinuations.set(startId, []);
+                const conts = _tableContinuations.get(startId)!;
+                if (!conts.includes(content)) {
+                    conts.push(content);
+                }
+                // The chain starter already has a getter - just read its content
+                // Render the combined content for this continuation message too
+                const record = MessageStore?.getMessages?.(chId);
+                if (record && typeof record.toArray === "function") {
+                    const arr = record.toArray();
+                    const startMsg = arr.find(m => m.id === startId);
+                    if (startMsg) {
+                        content = startMsg.content + "\n" + conts.join("\n");
+                    }
+                }
+            }
+        }
+    }
+
+    return content;
+}
+
 // Install reactive getter on a message so customRenderedContent always
 // reflects current content (handles edits + fresh loads automatically).
 function installGetter(msg: any): boolean {
@@ -99,10 +176,10 @@ function installGetter(msg: any): boolean {
     delete msg.customRenderedContent;
     Object.defineProperty(msg, "customRenderedContent", {
         get() {
-            if (!this?.content || typeof this.content !== "string") return void 0;
-            if (!hasTableSyntax(this.content)) return void 0;
+            const content = getRenderContent(this);
+            if (!content || !hasTableSyntax(content)) return void 0;
             return {
-                content: renderContent(parseContentBlocks(this.content)),
+                content: renderContent(parseContentBlocks(content)),
                 hasSpoilerEmbeds: false,
                 hasBailedAst: false,
             };
@@ -117,7 +194,23 @@ function installGetter(msg: any): boolean {
 function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
-    if (!hasTableSyntax(message.content)) return;
+
+    // Check if this is a multi-message table continuation
+    if (!hasTableSyntax(message.content)) {
+        const pipeLines = message.content.split("\n").filter(l => l.trim().startsWith("|"));
+        if (pipeLines.length > 0) {
+            const startId = findChainStart(message.id, chId);
+            if (startId) {
+                console.log("[BM] " + source + ": table continuation detected for chain starter", startId);
+                if (!_tableContinuations.has(startId)) _tableContinuations.set(startId, []);
+                _tableContinuations.get(startId)!.push(message.content);
+                // Force re-render of the chain starter message
+                try { MessageStore.emitChange?.(); } catch {}
+            }
+        }
+        return;
+    }
+
     console.log("[BM] " + source + ": table in msg", message.id);
 
     // Set on raw event data (store copies to new Message for CREATE)
@@ -160,9 +253,32 @@ function processChannel(chId: string, source: string) {
     }
     const arr = record.toArray();
     let count = 0;
+
+    // First pass: install getters on messages with standalone table syntax
     for (const msg of arr) {
         if (installGetter(msg)) count++;
     }
+
+    // Second pass: detect multi-message table chains (messages that start with |
+    // but don't have full table syntax, adjacent to a message that does)
+    for (let i = 1; i < arr.length; i++) {
+        const msg = arr[i];
+        if (hasTableSyntax(msg.content)) continue; // already handled
+        const pipeLines = msg.content.split("\n").filter(l => l.trim().startsWith("|"));
+        if (pipeLines.length === 0) continue;
+        // Check previous message for table syntax
+        if (hasTableSyntax(arr[i - 1].content)) {
+            const startId = arr[i - 1].id;
+            if (!_tableContinuations.has(startId)) _tableContinuations.set(startId, []);
+            const existing = _tableContinuations.get(startId)!;
+            if (!existing.includes(msg.content)) {
+                existing.push(msg.content);
+                console.log("[BM] " + source + ": chained continuation", msg.id, "->", startId);
+                count++; // count it so we emitChange
+            }
+        }
+    }
+
     console.log("[BM] " + source + ": installed getters on", count, "of", arr.length, "msgs");
     if (count > 0) {
         // Force store to re-emit so React re-renders messages
