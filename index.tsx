@@ -1,7 +1,8 @@
 /*
  * BetterMarkdown - Renders markdown tables inline by intercepting
- * Flux MESSAGE_CREATE events and setting customRenderedContent.
- * The renderer checks customRenderedContent before any other processing.
+ * Flux MESSAGE_CREATE and MESSAGE_UPDATE events and setting
+ * customRenderedContent on the finalized store message.
+ * The renderer checks customRenderedContent before any processing.
  */
 
 import { Devs } from "@utils/constants";
@@ -10,7 +11,6 @@ import { FluxDispatcher } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
 import { React } from "@webpack/common";
 
-// Lazy resolve the MessageStore — loads after start()
 const MessageStore = findByPropsLazy("getMessage", "getMessages");
 
 type ContentBlock =
@@ -82,63 +82,55 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
     return React.createElement(React.Fragment, null, ...ch);
 }
 
+// Shared handler for MESSAGE_CREATE and MESSAGE_UPDATE
+function handleMessage(channelId: string, message: any) {
+    if (!message?.content || typeof message.content !== "string") return;
+    if (!hasTableSyntax(message.content)) return;
+
+    // Set on raw data as immediate step
+    message.customRenderedContent = {
+        content: renderContent(parseContentBlocks(message.content)),
+        hasSpoilerEmbeds: false,
+        hasBailedAst: false,
+    };
+
+    // Run after store finishes processing: set on finalized Message object
+    queueMicrotask(() => {
+        try {
+            const stored = MessageStore?.getMessage(channelId, message.id);
+            if (stored && !stored.customRenderedContent) {
+                stored.customRenderedContent = {
+                    content: renderContent(parseContentBlocks(stored.content)),
+                    hasSpoilerEmbeds: false,
+                    hasBailedAst: false,
+                };
+            }
+        } catch {}
+    });
+}
+
 export default definePlugin({
     name: "BetterMarkdown",
     description: "Renders markdown tables inline via customRenderedContent",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    _unsub: null as any,
+    _unsubs: [] as any[],
 
     start() {
-        console.log("[BM] start()");
-        try {
-            if (!FluxDispatcher) { console.warn("[BM] FluxDispatcher not available"); return; }
-
-            this._unsub = FluxDispatcher.subscribe("MESSAGE_CREATE", (data: any) => {
-                try {
-                    const { channelId, message } = data;
-                    if (!message?.content || typeof message.content !== "string") return;
-                    if (!hasTableSyntax(message.content)) return;
-
-                    console.log("[BM] Table msg detected, will set after store processes", message.id);
-
-                    // Set on raw data too (might work for some code paths)
-                    message.customRenderedContent = {
-                        content: renderContent(parseContentBlocks(message.content)),
-                        hasSpoilerEmbeds: false,
-                        hasBailedAst: false,
-                    };
-
-                    // Run after store processes: set on finalized Message object
-                    queueMicrotask(() => {
-                        try {
-                            const stored = MessageStore?.getMessage(channelId, message.id);
-                            if (stored && !stored.customRenderedContent) {
-                                stored.customRenderedContent = {
-                                    content: renderContent(parseContentBlocks(stored.content)),
-                                    hasSpoilerEmbeds: false,
-                                    hasBailedAst: false,
-                                };
-                                console.log("[BM] Set customRenderedContent on stored msg", stored.id);
-                            }
-                        } catch (e2: any) {
-                            console.warn("[BM] microtask:", e2.message);
-                        }
-                    });
-                } catch (e: any) {
-                    console.warn("[BM] MESSAGE_CREATE handler:", e.message);
-                }
-            });
-
-            console.log("[BM] Subscribed to MESSAGE_CREATE");
-        } catch (e: any) {
-            console.error("[BM] start():", e.message);
-        }
+        if (!FluxDispatcher) return;
+        this._unsubs = [
+            FluxDispatcher.subscribe("MESSAGE_CREATE", (data: any) => {
+                handleMessage(data.channelId, data.message);
+            }),
+            FluxDispatcher.subscribe("MESSAGE_UPDATE", (data: any) => {
+                handleMessage(data.channelId, data.message);
+            }),
+        ];
     },
 
     stop() {
-        if (this._unsub) this._unsub();
-        console.log("[BM] stop()");
+        this._unsubs.forEach(u => u());
+        this._unsubs = [];
     },
 });
