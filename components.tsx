@@ -25,17 +25,17 @@ export function TaskListComponent({ items }: { items: { checked: boolean; text: 
     </div>);
 }
 
-export function renderContent(blocks: ContentBlock[]): React.ReactNode {
-    const textOpts = { allowHeading: true, allowLinks: true, allowList: true, allowEmojiLinks: true };
+export function renderContent(blocks: ContentBlock[], parseFn?: (text: string, inline: boolean, opts: any) => any, inline?: boolean, opts?: any): React.ReactNode {
+    const parse = parseFn ?? Parser.parse;
 
     if (blocks.length === 1 && blocks[0].type === "text")
-        return Parser.parse(blocks[0].text, false, textOpts);
+        return parse(blocks[0].text, inline ?? false, opts ?? { allowHeading: true, allowLinks: true, allowList: true, allowEmojiLinks: true });
 
     const ch: React.ReactNode[] = [];
     for (const b of blocks) {
         if (b.type === "text") {
             ch.push(React.createElement(React.Fragment, { key: ch.length },
-                Parser.parse(b.text, false, textOpts)));
+                parse(b.text, inline ?? false, opts ?? { allowHeading: true, allowLinks: true, allowList: true, allowEmojiLinks: true })));
         } else if (b.type === "table") {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
         } else if (b.type === "horizontal_rule") {
@@ -47,7 +47,7 @@ export function renderContent(blocks: ContentBlock[]): React.ReactNode {
             ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
         } else {
             ch.push(React.createElement(React.Fragment, { key: ch.length },
-                Parser.parse(b.content, false, textOpts)));
+                parse(b.content, false, textOpts)));
         }
     }
     return React.createElement(React.Fragment, null, ...ch);

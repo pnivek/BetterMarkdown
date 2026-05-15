@@ -340,7 +340,7 @@ function buildTables(
     }
 }
 
-export function needsInterception(c: string): boolean {
+export function hasSupportedSyntax(c: string): boolean {
     return tokenize(c).some(t => t.kind === "table_row" || t.kind === "task_list_item" || t.kind === "horizontal_rule");
 }
 

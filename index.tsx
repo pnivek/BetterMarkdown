@@ -1,19 +1,19 @@
 import definePlugin from "@utils/types";
-import { FluxDispatcher, MessageStore, Parser, React, SelectedChannelStore } from "@webpack/common";
+import { FluxDispatcher, MessageStore, Parser, SelectedChannelStore } from "@webpack/common";
 import { Logger } from "@utils/Logger";
-import { needsInterception, parseContentBlocks } from "./parsing";
-import { renderContent, TableComponent, TaskListComponent } from "./components";
+import { hasSupportedSyntax, parseContentBlocks } from "./parsing";
+import { renderContent } from "./components";
 
 const logger = new Logger("BetterMarkdown", "#a6d189");
 
 function installGetter(msg: any): boolean {
     if (!msg?.content || typeof msg.content !== "string") return false;
-    if (!needsInterception(msg.content)) return false;
+    if (!hasSupportedSyntax(msg.content)) return false;
     delete msg.customRenderedContent;
     Object.defineProperty(msg, "customRenderedContent", {
         get() {
             if (!this?.content || typeof this.content !== "string") return void 0;
-            if (!needsInterception(this.content)) return void 0;
+            if (!hasSupportedSyntax(this.content)) return void 0;
             return {
                 content: renderContent(parseContentBlocks(this.content)),
                 hasSpoilerEmbeds: false,
@@ -29,7 +29,7 @@ function installGetter(msg: any): boolean {
 function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
-    if (!needsInterception(message.content)) return;
+    if (!hasSupportedSyntax(message.content)) return;
     logger.log(source + ": table in msg", message.id);
 
     message.customRenderedContent = {
@@ -93,33 +93,11 @@ export default definePlugin({
 
         _origParse = Parser.parse;
         Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
-            if (typeof content !== "string" || !needsInterception(content)) {
+            if (typeof content !== "string" || !hasSupportedSyntax(content)) {
                 return _origParse!.call(this, content, inline, opts);
             }
             const blocks = parseContentBlocks(content);
-            if (blocks.length === 1 && blocks[0].type === "text") {
-                return _origParse!.call(this, content, inline, opts);
-            }
-            const ch: React.ReactNode[] = [];
-            for (const b of blocks) {
-                if (b.type === "text") {
-                    ch.push(React.createElement(React.Fragment, { key: ch.length },
-                        _origParse!.call(this, b.text, inline, opts)));
-                } else if (b.type === "table") {
-                    ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
-                } else if (b.type === "horizontal_rule") {
-                    ch.push(React.createElement("div", {
-                        key: ch.length,
-                        style: { height: 0, borderBottom: "2px solid var(--background-surface-high)", margin: "8px 0" }
-                    }));
-                } else if (b.type === "task_list") {
-                    ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
-                } else {
-                    ch.push(React.createElement(React.Fragment, { key: ch.length },
-                        _origParse!.call(this, b.content, inline, opts)));
-                }
-            }
-            return React.createElement(React.Fragment, null, ...ch);
+            return renderContent(blocks, _origParse!.bind(this), inline, opts);
         };
 
         if (!FluxDispatcher) return;
