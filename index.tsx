@@ -1,502 +1,25 @@
-// Intercepts Flux events to render GFM tables, task lists, and horizontal rules
-
 import definePlugin from "@utils/types";
-import { FluxDispatcher, Parser, React } from "@webpack/common";
-import { findByPropsLazy } from "@webpack";
+import { FluxDispatcher, MessageStore, Parser, SelectedChannelStore } from "@webpack/common";
 import { Logger } from "@utils/Logger";
+import { hasSupportedSyntax, parseContentBlocks } from "./parsing";
+import { renderContent } from "./components";
 
 const logger = new Logger("BetterMarkdown", "#a6d189");
 
-const MessageStore = findByPropsLazy("getMessage", "getMessages");
-const SelectedChannelStore = findByPropsLazy("getChannelId");
-
-type ContentBlock =
-    | { type: "text"; text: string }
-    | { type: "table"; header: string[]; body: string[][]; alignment?: ("left" | "center" | "right" | null)[] }
-    | { type: "task_list"; items: { checked: boolean; text: string }[] }
-    | { type: "horizontal_rule" }
-    | { type: "code_block"; content: string; fence: string };
-
-type LineToken =
-    | { kind: "code_block_fence"; fence: string }
-    | { kind: "table_row"; cells: string[]; leading: string; trailing: string }
-    | { kind: "task_list_item"; checked: boolean; text: string }
-    | { kind: "horizontal_rule" }
-    | { kind: "text"; content: string };
-
-// Task list item regex
-const TASK_ITEM_RE = /^(-|\*|\+)\s+\[([ xX])\]\s+(.*)$/;
-
-// GFM horizontal rule regex: 3+ dashes, asterisks, or underscores (with optional spaces)
-// The line must contain ONLY these characters and spaces.
-const HR_RE = /^\s*[-*_](?:\s*[-*_]){2,}\s*$/;
-
-function isSeparatorCells(cells: string[]): boolean {
-    return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
-}
-
-// Extracts per-column text alignment from a GFM separator row.
-//   :---  → left
-//   :---: → center
-//   ---:  → right
-//   ----  → null (browser default — left for <th>)
-function getColumnAlignment(cells: string[]): ("left" | "center" | "right" | null)[] {
-    return cells.map(c => {
-        const t = c.trim();
-        const left = t.startsWith(":");
-        const right = t.endsWith(":");
-        if (left && right) return "center";
-        if (left) return "left";
-        if (right) return "right";
-        return null;
-    });
-}
-
-// GFM task list item parser. Detects `- [ ]`, `- [x]`, `- [X]`, `* [ ]`, `+ [ ]`.
-// Strips inline code before matching to avoid false positives like
-// `` `- [ ] this is code, not a task` ``. Extracts the text from the original
-// line to preserve inline code content in the item text.
-function tryParseTaskListItem(raw: string): LineToken | null {
-    const line = raw.trim();
-    const clean = line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\\|/g, "");
-    const m = clean.match(TASK_ITEM_RE);
-    if (!m) return null;
-    const checked = m[2] === "x" || m[2] === "X";
-    // Prefix offset matches clean/original since no backticks precede `- [ ]`
-    const prefixEnd = m.index! + m[0].length - m[3].length;
-    const text = line.slice(prefixEnd).trim();
-    return { kind: "task_list_item", checked, text };
-}
-
-// GFM horizontal rule parser. Detects lines consisting of 3+ dashes,
-// asterisks, or underscores (with optional spaces). Such lines are rendered
-// as a visual separator in Discord.
-// Placed after tryParseTableRow / tryParseTaskListItem so that table separator
-// lines (\`|---|---|\`) and task list items (\`- [ ] text\`) take priority.
-function tryParseHorizontalRule(raw: string): LineToken | null {
-    const line = raw.trim();
-    if (HR_RE.test(line)) {
-        return { kind: "horizontal_rule" };
-    }
-    return null;
-}
-
-// ---------------------------------------------------------------------------
-// Lexer: single-pass tokenizer with stack-based code-awareness.
-// Produces LineToken[] — each table_row token already has cells extracted.
-// ---------------------------------------------------------------------------
-
-function tokenize(content: string): LineToken[] {
-    const lines = content.split("\n");
-    const tokens: LineToken[] = [];
-    const state: string[] = []; // stack: "code_block"
-
-    for (const rawLine of lines) {
-        const trimmed = rawLine.trim();
-        const currentState = state[state.length - 1] ?? null;
-
-        // Code block fences toggle state on ```
-        if (trimmed.startsWith("```")) {
-            if (currentState === "code_block") {
-                state.pop();
-            } else {
-                state.push("code_block");
-            }
-            tokens.push({ kind: "code_block_fence", fence: trimmed });
-            continue;
-        }
-
-        // Inside a code block — everything is literal text
-        if (currentState === "code_block") {
-            tokens.push({ kind: "text", content: rawLine });
-            continue;
-        }
-
-        // Outside code — try table first, then task list, then plain text
-        const row = tryParseTableRow(rawLine);
-        if (row) { tokens.push(row); continue; }
-        const task = tryParseTaskListItem(rawLine);
-        if (task) { tokens.push(task); continue; }
-        const hr = tryParseHorizontalRule(rawLine);
-        tokens.push(hr ?? { kind: "text", content: rawLine });
-    }
-
-    return tokens;
-}
-
-// Character-walk table row parser with backtick-pair matching. Phases: leading, cells, trailing
-function tryParseTableRow(raw: string): LineToken | null {
-    const line = raw.trim();
-
-    let leading = "";
-    let cells: string[] = [];
-    let cell = "";
-    let trailing = "";
-    let phase: "leading" | "cells" | "trailing" = "leading";
-
-    // Stack-based inline code tracking:
-    // null = outside code, number = inside code opened by N backticks
-    let codeDelim: number | null = null;
-    // Tracks straight and curly double-quotes to suppress pipe boundaries in quoted strings
-    let inQuote = false;
-    let i = 0;
-
-    while (i < line.length) {
-        const ch = line[i];
-
-        // Backtick grouping — treat consecutive backticks as a unit
-        if (ch === "`") {
-            let count = 1;
-            while (i + count < line.length && line[i + count] === "`") count++;
-
-            if (codeDelim === null) {
-                codeDelim = count;       // entering inline code
-            } else if (count === codeDelim) {
-                codeDelim = null;        // exiting inline code
-            }
-            // Different-length group inside code = content, not delimiter
-
-            const chunk = line.slice(i, i + count);
-            if (phase === "leading") leading += chunk;
-            else if (phase === "cells") cell += chunk;
-            else trailing += chunk;
-
-            i += count;
-            continue;
-        }
-
-        // Toggle inQuote on straight or curly double-quotes (outside code only)
-        if (codeDelim === null && (ch === '"' || ch === "“" || ch === "”")) {
-            inQuote = !inQuote;
-        }
-
-        // Escaped pipe: \| outside code/quotes = literal pipe, not column break
-        if (ch === '\\' && i + 1 < line.length && line[i + 1] === '|' && codeDelim === null && !inQuote) {
-            if (phase === 'leading') leading += '|';
-            else if (phase === 'cells') cell += '|';
-            else trailing += '|';
-            i += 2;
-            continue;
-        }
-
-        // Pipe outside of inline code AND outside of quotes → phase transition
-        if (ch === "|" && codeDelim === null && !inQuote) {
-            if (phase === "leading") {
-                leading = leading.trimEnd();
-                phase = "cells";
-            } else if (phase === "cells") {
-                cells.push(cell.trim());
-                cell = "";
-            }
-            // In trailing phase, a stray | is just literal text
-            else {
-                trailing += ch;
-            }
-            i++;
-            continue;
-        }
-
-        // Regular character — route to current phase
-        if (phase === "leading") leading += ch;
-        else if (phase === "cells") cell += ch;
-        else trailing += ch;
-        i++;
-    }
-
-    // Never entered the cells phase → not a table row
-    if (phase === "leading") return null;
-
-    // --- Post-processing: use code/escape-stripped line to determine the real ---
-    // --- cell/trailing boundary. Escaped pipes (\|) are removed since the ---
-    // --- character walk already consumed them as literal cell content. ---
-    const clean = line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\\|/g, "");
-    const STRUCT_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
-    const sm = clean.match(STRUCT_RE);
-    if (!sm) return null;
-
-    // Number of data cells = pipes in group 2 minus the leading pipe
-    // "| a | b |" → 3 pipes → 2 cells
-    const pipeCount = (sm[2].match(/\|/g) || []).length;
-    const structCellCount = Math.max(1, pipeCount - 1);
-    const trailingClean = sm[3]?.trim() || "";
-
-    // If we extracted more cells than the structure allows, the extras
-    // are actually trailing text. Move them from cells → trailing.
-    while (cells.length > structCellCount) {
-        const extra = cells.pop()!;
-        trailing = extra + (trailing ? " " + trailing : "");
-    }
-
-    // If the structure shows trailing text but we extracted it as a cell
-    // buffer, move it to trailing.
-    if (trailingClean && !trailing && cell.trim()) {
-        trailing = cell.trim();
-        cell = "";
-    }
-
-    // Push the final cell only if there's actual content.
-    // Don't push an empty string just because cells.length > 0.
-    if (cell.trim()) cells.push(cell.trim());
-
-    // Need at least 2 cells (single pipe produces 2 cells minimum)
-    if (cells.length < 2) return null;
-
-    // If every cell is empty the line had no real table content
-    if (cells.every(c => c === "")) return null;
-
-    return {
-        kind: "table_row",
-        cells,
-        leading: leading.trim(),
-        trailing: trailing.trim(),
-    };
-}
-
-// ---------------------------------------------------------------------------
-// Parser: walks tokens → ContentBlock[].
-// Table rows group by column count match — no salvage fallback, no re-slicing.
-// ---------------------------------------------------------------------------
-
-function parse(tokens: LineToken[]): ContentBlock[] {
-    const blocks: ContentBlock[] = [];
-    let i = 0;
-
-    while (i < tokens.length) {
-        const t = tokens[i];
-
-        if (t.kind === "code_block_fence") {
-            // Collect entire code block
-            const fence = t.fence;
-            const codeLines: string[] = [t.fence];
-            i++;
-            while (i < tokens.length && tokens[i].kind !== "code_block_fence") {
-                codeLines.push(tokens[i].kind === "text" ? tokens[i].content : "");
-                i++;
-            }
-            if (i < tokens.length) {
-                codeLines.push(tokens[i].fence);
-                i++;
-            }
-            blocks.push({ type: "code_block", content: codeLines.join("\n"), fence });
-            continue;
-        }
-
-        if (t.kind === "table_row") {
-            // Collect consecutive table-row tokens
-            const rows: { kind: "table_row"; cells: string[]; leading: string; trailing: string }[] = [];
-            const leadingText: string[] = [];
-            const trailingText: string[] = [];
-
-            while (i < tokens.length && tokens[i].kind === "table_row") {
-                const tr = tokens[i] as Extract<LineToken, { kind: "table_row" }>;
-                rows.push(tr);
-                if (tr.leading) leadingText.push(tr.leading);
-                if (tr.trailing) trailingText.push(tr.trailing);
-                i++;
-            }
-
-            // Emit leading text from the first row (existing behavior)
-            if (leadingText.length > 0)
-                blocks.push({ type: "text", text: leadingText[0] });
-
-            // Build table(s) — split on column count mismatches
-            buildTables(rows, blocks);
-
-            // Emit trailing text
-            if (trailingText.length > 0)
-                blocks.push({ type: "text", text: trailingText.join(" ") });
-
-            continue;
-        }
-
-        if (t.kind === "horizontal_rule") {
-            blocks.push({ type: "horizontal_rule" });
-            i++;
-            continue;
-        }
-
-        if (t.kind === "task_list_item") {
-            // Collect consecutive task items into a single task_list block
-            const items: { checked: boolean; text: string }[] = [];
-
-            while (i < tokens.length && tokens[i].kind === "task_list_item") {
-                const ti = tokens[i] as Extract<LineToken, { kind: "task_list_item" }>;
-                items.push({ checked: ti.checked, text: ti.text });
-                i++;
-            }
-
-            blocks.push({ type: "task_list", items });
-            continue;
-        }
-
-        // Plain text — accumulate until next non-text token
-        const textLines: string[] = [];
-        while (i < tokens.length && tokens[i].kind === "text") {
-            textLines.push(tokens[i].content);
-            i++;
-        }
-        const joined = textLines.join("\n").trim();
-        if (joined) blocks.push({ type: "text", text: joined });
-    }
-
-    return blocks;
-}
-
-// Column-aware table builder. Groups consecutive rows into tables,
-// splitting when column counts differ. Handles all three GFM cases:
-//   1. separator-first → body-only table
-//   2. header + separator + body → full table
-//   3. no separator → body-only table
-function buildTables(
-    rows: { cells: string[]; leading: string; trailing: string }[],
-    blocks: ContentBlock[]
-): void {
-    let start = 0;
-
-    while (start < rows.length) {
-        const sepIdx = rows.slice(start).findIndex(r => isSeparatorCells(r.cells));
-        const absSep = sepIdx >= 0 ? start + sepIdx : -1;
-
-        if (absSep >= 0 && absSep > start) {
-            // Case 2: header + separator + body
-            const header = rows[start].cells;
-            const bodyRows = rows.slice(absSep + 1);
-
-            // Column consistency: body must match header width
-            const bodyOk = bodyRows.length === 0 ||
-                bodyRows.every(r => r.cells.length === header.length);
-
-            if (bodyOk && header.length >= 1) {
-                const alignment = getColumnAlignment(rows[absSep].cells);
-                blocks.push({
-                    type: "table",
-                    header,
-                    body: bodyRows.map(r => r.cells),
-                    alignment,
-                });
-                start = absSep + 1 + bodyRows.length;
-                continue;
-            }
-            // Mismatch → fall through to body-only interpretation
-        }
-
-        if (absSep === start) {
-            // Case 1: separator-first — body-only table
-            const bodyRows = rows.slice(absSep + 1);
-            if (bodyRows.length === 0) { start++; continue; }
-
-            const cellCount = bodyRows[0].cells.length;
-            let end = start + 1;
-            while (end < rows.length &&
-                   rows[end].cells.length === cellCount &&
-                   !isSeparatorCells(rows[end].cells)) end++;
-
-            if (cellCount >= 2) {
-                const alignment = getColumnAlignment(rows[absSep].cells);
-                blocks.push({
-                    type: "table",
-                    header: [],
-                    body: bodyRows.slice(0, end - (start + 1)).map(r => r.cells),
-                    alignment,
-                });
-            }
-            start = end;
-            continue;
-        }
-
-        // Case 3: no separator — no alignment info — body-only table
-        const cellCount = rows[start].cells.length;
-        if (cellCount < 2) {
-            // Single cell row → treat as regular text
-            blocks.push({ type: "text", text: rows[start].cells.map(c => `| ${c} |`).join(" ") });
-            start++;
-            continue;
-        }
-
-        let end = start + 1;
-        while (end < rows.length &&
-               rows[end].cells.length === cellCount &&
-               !isSeparatorCells(rows[end].cells)) end++;
-
-        blocks.push({
-            type: "table",
-            header: [],
-            body: rows.slice(start, end).map(r => r.cells),
-        });
-        start = end;
-    }
-}
-function needsInterception(c: string): boolean {
-    return tokenize(c).some(t => t.kind === "table_row" || t.kind === "task_list_item" || t.kind === "horizontal_rule");
-}
-
-function parseContentBlocks(c: string): ContentBlock[] {
-    return parse(tokenize(c));
-}
-function TableComponent({ header, body, alignment }: { header: string[]; body: string[][]; alignment?: ("left" | "center" | "right" | null)[] }) {
-    const inlineOpts = { allowLinks: true, allowList: true };
-    const align = (i: number): string => alignment?.[i] ?? "left";
-    return (<div style={{ marginTop: 4, marginBottom: 4, overflow: "hidden", borderRadius: 4, border: "2px solid var(--background-surface-high)", background: "var(--background-secondary)", color: "var(--text-normal)", maxWidth: "100%" }}>
-        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: align(i) as any, fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
-            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)", textAlign: align(ci) as any }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
-        </table></div>);
-}
-function TaskListComponent({ items }: { items: { checked: boolean; text: string }[] }) {
-    const inlineOpts = { allowLinks: true, allowList: true };
-    return (<div style={{ marginTop: 4, marginBottom: 4, background: "var(--background-secondary)", borderRadius: 4, padding: "4px 0", color: "var(--text-normal)", fontFamily: "var(--font-primary)", fontSize: 13 }}>
-        {items.map((item, i) => (<div key={i} style={{ display: "flex", alignItems: "center", padding: "4px 12px", gap: 8 }}>
-            <span style={{ flexShrink: 0, width: 18, height: 18, borderRadius: 3, border: item.checked ? "none" : "2px solid var(--text-muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", background: item.checked ? "var(--green-360)" : "transparent" }}>
-                {item.checked ? "✓" : ""}
-            </span>
-            <span style={{ textDecoration: item.checked ? "line-through" : "none", opacity: item.checked ? 0.6 : 1, color: "var(--text-normal)" }}>
-                {Parser.parse(item.text, true, inlineOpts) ?? item.text}
-            </span>
-        </div>))}
-    </div>);
-}
-function renderContent(blocks: ContentBlock[]): React.ReactNode {
-    const textOpts = { allowHeading: true, allowLinks: true, allowList: true, allowEmojiLinks: true };
-
-    if (blocks.length === 1 && blocks[0].type === "text")
-        return Parser.parse(blocks[0].text, false, textOpts);
-
-    const ch: React.ReactNode[] = [];
-    for (const b of blocks) {
-        if (b.type === "text") {
-            ch.push(React.createElement(React.Fragment, { key: ch.length },
-                Parser.parse(b.text, false, textOpts)));
-        } else if (b.type === "table") {
-            ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
-        } else if (b.type === "horizontal_rule") {
-            ch.push(React.createElement("div", {
-                key: ch.length,
-                style: { height: 0, borderBottom: "2px solid var(--background-surface-high)", margin: "8px 0" }
-            }));
-        } else if (b.type === "task_list") {
-            ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
-        } else {
-            // code_block — pass through to Discord's parser as-is
-            ch.push(React.createElement(React.Fragment, { key: ch.length },
-                Parser.parse(b.content, false, textOpts)));
-        }
-    }
-    return React.createElement(React.Fragment, null, ...ch);
-}
-
-// Install a reactive getter for customRenderedContent on a message object.
-// The getter re-evaluates this.content on every read, so table rendering
-// automatically updates when the message is edited — no MESSAGE_UPDATE
-// handler needed for the getter itself (the Flux handler still handles the
-// initial detection and edge cases).
+/**
+ * Installs a reactive `customRenderedContent` getter on a stored Discord message.
+ * Re-evaluates each read so edits to `msg.content` show up without refresh.
+ * Returns true if the getter was installed, false if the message has no
+ * supported syntax (or no content).
+ */
 function installGetter(msg: any): boolean {
     if (!msg?.content || typeof msg.content !== "string") return false;
-    if (!needsInterception(msg.content)) return false;
+    if (!hasSupportedSyntax(msg.content)) return false;
     delete msg.customRenderedContent;
     Object.defineProperty(msg, "customRenderedContent", {
         get() {
             if (!this?.content || typeof this.content !== "string") return void 0;
-            if (!needsInterception(this.content)) return void 0;
+            if (!hasSupportedSyntax(this.content)) return void 0;
             return {
                 content: renderContent(parseContentBlocks(this.content)),
                 hasSpoilerEmbeds: false,
@@ -509,24 +32,22 @@ function installGetter(msg: any): boolean {
     return true;
 }
 
-// Handle a message or message batch from any Flux event source.
-// Sets customRenderedContent on the raw event data (sync — store copies this
-// into the new Message object) and also installs a reactive getter on the
-// stored message in MessageStore (async/microtask — in case the event data
-// is a shallow copy that won't persist).
+/**
+ * Handles a MESSAGE_CREATE / MESSAGE_UPDATE event: renders the message's
+ * customRenderedContent immediately, then installs a reactive getter on the
+ * stored copy (now and on the next microtask, since the store write may race).
+ */
 function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
-    if (!needsInterception(message.content)) return;
+    if (!hasSupportedSyntax(message.content)) return;
     logger.log(source + ": table in msg", message.id);
 
-    // Set on raw event data (store copies to new Message for CREATE)
     message.customRenderedContent = {
         content: renderContent(parseContentBlocks(message.content)),
         hasSpoilerEmbeds: false, hasBailedAst: false,
     };
 
-    // Install reactive getter on stored message
     try {
         const stored = MessageStore?.getMessage(chId, message.id);
         if (stored) {
@@ -537,7 +58,6 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
         logger.warn(source + ": getter failed:", e.message);
     }
 
-    // Microtask fallback for CREATE
     queueMicrotask(() => {
         try {
             const stored = MessageStore?.getMessage(chId, message.id);
@@ -549,7 +69,11 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
     });
 }
 
-// Process all messages in a channel's store (for LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT)
+/**
+ * Walks every message currently stored for a channel and installs the reactive
+ * getter on any with supported syntax. Emits a MessageStore change so the
+ * affected messages re-render once getters are in place.
+ */
 function processChannel(chId: string, source: string) {
     const record = MessageStore?.getMessages?.(chId);
     if (!record || typeof record.toArray !== "function") {
@@ -583,48 +107,16 @@ export default definePlugin({
     start() {
         logger.log("start()");
 
-        // Wrap Parser.parse so tables render anywhere Discord's markdown
-        // parser is called — MessageLogger edit history, channel topics,
-        // and any other context that calls Parser.parse directly.
-        // Live messages use the customRenderedContent getter (above),
-        // so there's no risk of double-processing.
         _origParse = Parser.parse;
         Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
-            if (typeof content !== "string" || !needsInterception(content)) {
+            if (typeof content !== "string" || !hasSupportedSyntax(content)) {
                 return _origParse!.call(this, content, inline, opts);
             }
             const blocks = parseContentBlocks(content);
-            if (blocks.length === 1 && blocks[0].type === "text") {
-                return _origParse!.call(this, content, inline, opts);
-            }
-            const ch: React.ReactNode[] = [];
-            for (const b of blocks) {
-                if (b.type === "text") {
-                    ch.push(React.createElement(React.Fragment, { key: ch.length },
-                        _origParse!.call(this, b.text, inline, opts)));
-                } else if (b.type === "table") {
-                    ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
-                } else if (b.type === "horizontal_rule") {
-                    ch.push(React.createElement("div", {
-                        key: ch.length,
-                        style: { height: 0, borderBottom: "2px solid var(--background-surface-high)", margin: "8px 0" }
-                    }));
-                } else if (b.type === "task_list") {
-                    ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
-                } else {
-                    // code_block — pass through to Discord's parser
-                    ch.push(React.createElement(React.Fragment, { key: ch.length },
-                        _origParse!.call(this, b.content, inline, opts)));
-                }
-            }
-            return React.createElement(React.Fragment, null, ...ch);
+            return renderContent(blocks, _origParse!.bind(this), inline, opts);
         };
 
         if (!FluxDispatcher) return;
-        // Subscribe to Flux events to catch messages across all contexts.
-        // MESSAGE_CREATE/UPDATE handle live and edited messages.
-        // LOAD_MESSAGES_SUCCESS/CHANNEL_SELECT/CHANNEL_OPEN handle
-        // already-loaded messages (scrolling, switching channels, restart).
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
             FluxDispatcher.subscribe("MESSAGE_UPDATE", (d: any) => handleMsg(d.channelId, d.message, "UPDATE")),
@@ -648,7 +140,6 @@ export default definePlugin({
     stop() {
         this._unsubs.forEach(u => u());
         this._unsubs = [];
-        // Restore original Parser.parse
         if (_origParse && Parser.parse !== _origParse) {
             Parser.parse = _origParse;
             _origParse = null;
