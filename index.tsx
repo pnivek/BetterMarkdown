@@ -37,7 +37,8 @@ const SelectedChannelStore = findByPropsLazy("getChannelId");
 
 type ContentBlock =
     | { type: "text"; text: string }
-    | { type: "table"; header: string[]; body: string[][] };
+    | { type: "table"; header: string[]; body: string[][] }
+    | { type: "code_block"; content: string; fence: string };
 
 // TABLE_ROW_RE captures three groups from a line containing a pipe-delimited structure:
 //   [1] Leading text before the first | (may be empty)
