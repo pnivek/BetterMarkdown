@@ -10,11 +10,14 @@
  * Parsing strategy (two-pass lexer + parser):
  * - tokenize() — Single pass through content with a stack for nested state
  *   (code blocks). Produces line-level tokens: code_block_fence, table_row,
- *   task_list_item, or text.
+ *   task_list_item, horizontal_rule, or text.
  * - tryParseTableRow() — Backtick delimiter-pair matching (stack semantics)
  *   extracts cells from the original line preserving inline code content.
  * - tryParseTaskListItem() — Detects GFM task list syntax `- [ ]` / `- [x]`
  *   with code-aware matching to avoid false positives inside inline code.
+ * - tryParseHorizontalRule() — Detects GFM horizontal rules (`---`, `***`,
+ *   `___`) using a single regex pass, placed after table/task list checks
+ *   to avoid conflicting with table separators.
  * - parse() — Walks tokens, assembles ContentBlocks. Table rows group by
  *   column count match; task items group into task_list blocks.
  *   No salvage fallback, no re-slicing.
@@ -41,16 +44,22 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] }
     | { type: "task_list"; items: { checked: boolean; text: string }[] }
+    | { type: "horizontal_rule" }
     | { type: "code_block"; content: string; fence: string };
 
 type LineToken =
     | { kind: "code_block_fence"; fence: string }
     | { kind: "table_row"; cells: string[]; leading: string; trailing: string }
     | { kind: "task_list_item"; checked: boolean; text: string }
+    | { kind: "horizontal_rule" }
     | { kind: "text"; content: string };
 
 // Task list item regex
 const TASK_ITEM_RE = /^(-|\*|\+)\s+\[([ xX])\]\s+(.*)$/;
+
+// GFM horizontal rule regex: 3+ dashes, asterisks, or underscores (with optional spaces)
+// The line must contain ONLY these characters and spaces.
+const HR_RE = /^\s*[-*_](?:\s*[-*_]){2,}\s*$/;
 
 function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
@@ -71,6 +80,19 @@ function tryParseTaskListItem(raw: string): LineToken | null {
     const prefixEnd = m.index! + m[0].length - m[3].length;
     const text = line.slice(prefixEnd).trim();
     return { kind: "task_list_item", checked, text };
+}
+
+// GFM horizontal rule parser. Detects lines consisting of 3+ dashes,
+// asterisks, or underscores (with optional spaces). Such lines are rendered
+// as a visual separator in Discord.
+// Placed after tryParseTableRow / tryParseTaskListItem so that table separator
+// lines (\`|---|---|\`) and task list items (\`- [ ] text\`) take priority.
+function tryParseHorizontalRule(raw: string): LineToken | null {
+    const line = raw.trim();
+    if (HR_RE.test(line)) {
+        return { kind: "horizontal_rule" };
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +130,9 @@ function tokenize(content: string): LineToken[] {
         const row = tryParseTableRow(rawLine);
         if (row) { tokens.push(row); continue; }
         const task = tryParseTaskListItem(rawLine);
-        tokens.push(task ?? { kind: "text", content: rawLine });
+        if (task) { tokens.push(task); continue; }
+        const hr = tryParseHorizontalRule(rawLine);
+        tokens.push(hr ?? { kind: "text", content: rawLine });
     }
 
     return tokens;
@@ -300,6 +324,12 @@ function parse(tokens: LineToken[]): ContentBlock[] {
             continue;
         }
 
+        if (t.kind === "horizontal_rule") {
+            blocks.push({ type: "horizontal_rule" });
+            i++;
+            continue;
+        }
+
         if (t.kind === "task_list_item") {
             // Collect consecutive task items into a single task_list block
             const items: { checked: boolean; text: string }[] = [];
@@ -407,8 +437,8 @@ function buildTables(
         start = end;
     }
 }
-function hasTableSyntax(c: string): boolean {
-    return tokenize(c).some(t => t.kind === "table_row" || t.kind === "task_list_item");
+function needsInterception(c: string): boolean {
+    return tokenize(c).some(t => t.kind === "table_row" || t.kind === "task_list_item" || t.kind === "horizontal_rule");
 }
 
 function parseContentBlocks(c: string): ContentBlock[] {
@@ -448,6 +478,11 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
                 Parser.parse(b.text, false, textOpts)));
         } else if (b.type === "table") {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+        } else if (b.type === "horizontal_rule") {
+            ch.push(React.createElement("div", {
+                key: ch.length,
+                style: { height: 0, borderBottom: "2px solid var(--background-surface-high)", margin: "8px 0" }
+            }));
         } else if (b.type === "task_list") {
             ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
         } else {
@@ -466,12 +501,12 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
 // initial detection and edge cases).
 function installGetter(msg: any): boolean {
     if (!msg?.content || typeof msg.content !== "string") return false;
-    if (!hasTableSyntax(msg.content)) return false;
+    if (!needsInterception(msg.content)) return false;
     delete msg.customRenderedContent;
     Object.defineProperty(msg, "customRenderedContent", {
         get() {
             if (!this?.content || typeof this.content !== "string") return void 0;
-            if (!hasTableSyntax(this.content)) return void 0;
+            if (!needsInterception(this.content)) return void 0;
             return {
                 content: renderContent(parseContentBlocks(this.content)),
                 hasSpoilerEmbeds: false,
@@ -492,7 +527,7 @@ function installGetter(msg: any): boolean {
 function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
-    if (!hasTableSyntax(message.content)) return;
+    if (!needsInterception(message.content)) return;
     logger.log(source + ": table in msg", message.id);
 
     // Set on raw event data (store copies to new Message for CREATE)
@@ -565,7 +600,7 @@ export default definePlugin({
         // so there's no risk of double-processing.
         _origParse = Parser.parse;
         Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
-            if (typeof content !== "string" || !hasTableSyntax(content)) {
+            if (typeof content !== "string" || !needsInterception(content)) {
                 return _origParse!.call(this, content, inline, opts);
             }
             const blocks = parseContentBlocks(content);
@@ -579,6 +614,11 @@ export default definePlugin({
                         _origParse!.call(this, b.text, inline, opts)));
                 } else if (b.type === "table") {
                     ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+                } else if (b.type === "horizontal_rule") {
+                    ch.push(React.createElement("div", {
+                        key: ch.length,
+                        style: { height: 0, borderBottom: "2px solid var(--background-surface-high)", margin: "8px 0" }
+                    }));
                 } else if (b.type === "task_list") {
                     ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
                 } else {
