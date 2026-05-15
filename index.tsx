@@ -63,30 +63,46 @@ function isSeparator(l: string): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
 }
 function splitCells(l: string): string[] {
-    // Strip inline code before regex match — prevents the first | inside
-    // backticks from being mistaken for the start of the table structure.
-    // Since we operate on the already-stripped struct (group [2]), a simple
-    // backtick toggle is sufficient — any remaining backticks are single
-    // characters inside cell content, not real code delimiters.
-    const clean = l.trim().replace(/(`+)[\s\S]*?\1/g, "");
-    const m = clean.match(TABLE_ROW_RE);
-    if (!m) return [];
-    const struct = m[2];
-    // Walk the struct character by character, tracking backtick state
-    // so pipes inside inline code aren't treated as cell boundaries.
-    // Skip index 0 (the leading |) since we only care about content.
+    const raw = l.trim();
+    // Guard: strip inline code to check that pipes are real table boundaries,
+    // not just characters inside code spans (e.g., `` `| code |` ``).
+    const clean = raw.replace(/(`+)[\s\S]*?\1/g, "");
+    if (!TABLE_ROW_RE.test(clean)) return [];
+
+    // Extract cells from the ORIGINAL line (not stripped) so inline code
+    // content like `` `Code` `` and `` `` `inline code` `` `` is preserved.
+    // Walk with backtick delimiter-pair matching (codeDelim) — same logic as
+    // the leading-text extraction in parseContentBlocks.
     const cells: string[] = [];
     let cell = "";
     let inCode = false;
-    for (let i = 0; i < struct.length; i++) {
-        const ch = struct[i];
+    let codeDelim = 0;
+    let foundFirstPipe = false;
+
+    for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
         if (ch === "`") {
-            inCode = !inCode;
-            if (i > 0) cell += ch;
-        } else if (ch === "|" && !inCode && i > 0) {
-            cells.push(cell.trim());
-            cell = "";
-        } else if (i > 0) {
+            let count = 1;
+            while (i + count < raw.length && raw[i + count] === "`") count++;
+            if (!inCode) {
+                inCode = true;
+                codeDelim = count;
+            } else if (count === codeDelim) {
+                inCode = false;
+                codeDelim = 0;
+            }
+            if (foundFirstPipe) {
+                for (let k = 0; k < count; k++) cell += raw[i + k];
+            }
+            i += count - 1;
+        } else if (ch === "|" && !inCode) {
+            if (!foundFirstPipe) {
+                foundFirstPipe = true;
+            } else {
+                cells.push(cell.trim());
+                cell = "";
+            }
+        } else if (foundFirstPipe) {
             cell += ch;
         }
     }
