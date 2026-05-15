@@ -37,7 +37,10 @@ function isSeparator(l: string): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
 }
 function splitCells(l: string): string[] {
-    const m = l.trim().match(TABLE_ROW_RE);
+    // Strip inline code before regex match — prevents the first | inside
+    // backticks from being mistaken for the start of the table structure
+    const clean = l.trim().replace(/(`+)[\s\S]*?\1/g, "");
+    const m = clean.match(TABLE_ROW_RE);
     if (!m) return [];
     const struct = m[2];
     // Walk character by character, tracking backtick state
@@ -116,6 +119,14 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
     const sepIdx = lines.findIndex(l => isSeparator(l));
 
     if (sepIdx >= 0) {
+        if (sepIdx === 0) {
+            // Separator is the first line — no header, all subsequent rows are body
+            const b = lines.slice(1).map(l => splitCells(l));
+            if (b.length === 0) return null;
+            const cellCount = b[0].length;
+            if (cellCount < 2 || b.some(r => r.length !== cellCount)) return null;
+            return { header: [], body: b };
+        }
         // Full table: header + separator + body
         const h = splitCells(lines[0]);
         const b = lines.slice(sepIdx + 1).map(l => splitCells(l));
