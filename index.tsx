@@ -6,6 +6,12 @@ import { renderContent } from "./components";
 
 const logger = new Logger("BetterMarkdown", "#a6d189");
 
+/**
+ * Installs a reactive `customRenderedContent` getter on a stored Discord message.
+ * Re-evaluates each read so edits to `msg.content` show up without refresh.
+ * Returns true if the getter was installed, false if the message has no
+ * supported syntax (or no content).
+ */
 function installGetter(msg: any): boolean {
     if (!msg?.content || typeof msg.content !== "string") return false;
     if (!hasSupportedSyntax(msg.content)) return false;
@@ -26,6 +32,11 @@ function installGetter(msg: any): boolean {
     return true;
 }
 
+/**
+ * Handles a MESSAGE_CREATE / MESSAGE_UPDATE event: renders the message's
+ * customRenderedContent immediately, then installs a reactive getter on the
+ * stored copy (now and on the next microtask, since the store write may race).
+ */
 function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
@@ -58,6 +69,11 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
     });
 }
 
+/**
+ * Walks every message currently stored for a channel and installs the reactive
+ * getter on any with supported syntax. Emits a MessageStore change so the
+ * affected messages re-render once getters are in place.
+ */
 function processChannel(chId: string, source: string) {
     const record = MessageStore?.getMessages?.(chId);
     if (!record || typeof record.toArray !== "function") {

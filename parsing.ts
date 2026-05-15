@@ -17,10 +17,12 @@ export type LineToken =
 const TASK_ITEM_RE = /^(-|\*|\+)\s+\[([ xX])\]\s+(.*)$/;
 const HR_RE = /^\s*[-*_](?:\s*[-*_]){2,}\s*$/;
 
+// true when every cell looks like a GFM table separator (e.g. `---`, `:--:`)
 function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
 }
 
+// reads `:---`, `---:`, `:---:` per cell into "left" | "right" | "center" | null
 function getColumnAlignment(cells: string[]): ("left" | "center" | "right" | null)[] {
     return cells.map(c => {
         const t = c.trim();
@@ -33,6 +35,7 @@ function getColumnAlignment(cells: string[]): ("left" | "center" | "right" | nul
     });
 }
 
+// matches `- [ ] text` / `- [x] text` (and `*` / `+` bullets); null if not a task line
 function tryParseTaskListItem(raw: string): LineToken | null {
     const line = raw.trim();
     const clean = line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\\|/g, "");
@@ -44,6 +47,7 @@ function tryParseTaskListItem(raw: string): LineToken | null {
     return { kind: "task_list_item", checked, text };
 }
 
+// matches a `---` / `***` / `___` style horizontal rule line; null otherwise
 function tryParseHorizontalRule(raw: string): LineToken | null {
     const line = raw.trim();
     if (HR_RE.test(line)) {
@@ -52,6 +56,8 @@ function tryParseHorizontalRule(raw: string): LineToken | null {
     return null;
 }
 
+// splits a pipe-delimited table row into leading/cells/trailing while respecting
+// backtick code spans, quoted strings, and `\|` escapes; null if it isn't a row
 function tryParseTableRow(raw: string): LineToken | null {
     const line = raw.trim();
 
@@ -153,6 +159,11 @@ function tryParseTableRow(raw: string): LineToken | null {
     };
 }
 
+/**
+ * Splits content into per-line tokens, tracking fenced code blocks so their
+ * contents are passed through as plain text. Returns the token sequence
+ * that {@link parseContentBlocks} groups into ContentBlocks.
+ */
 export function tokenize(content: string): LineToken[] {
     const lines = content.split("\n");
     const tokens: LineToken[] = [];
@@ -266,6 +277,8 @@ function parse(tokens: LineToken[]): ContentBlock[] {
     return blocks;
 }
 
+// groups a run of table_row tokens into one or more `table` blocks, handling
+// header/separator/body shapes and falling back to text when rows don't line up
 function buildTables(
     rows: { cells: string[]; leading: string; trailing: string }[],
     blocks: ContentBlock[]
@@ -340,10 +353,19 @@ function buildTables(
     }
 }
 
+/**
+ * Cheap pre-check: does this content contain any syntax we'd want to render
+ * ourselves (table row, task list item, or horizontal rule)?
+ * Used as a fast bail-out before doing full parsing.
+ */
 export function hasSupportedSyntax(c: string): boolean {
     return tokenize(c).some(t => t.kind === "table_row" || t.kind === "task_list_item" || t.kind === "horizontal_rule");
 }
 
+/**
+ * Full pipeline: tokenize + group into ContentBlocks (text, table, task_list,
+ * horizontal_rule, code_block) ready to be handed to {@link renderContent}.
+ */
 export function parseContentBlocks(c: string): ContentBlock[] {
     return parse(tokenize(c));
 }
