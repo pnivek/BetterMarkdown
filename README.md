@@ -4,20 +4,28 @@ A [Vencord](https://vencord.dev) plugin that renders GFM-style markdown tables i
 
 ## Features
 
-- **Tables** — Renders pipe-delimited tables as styled HTML tables, inline with the message content
-- **Partial tables** — Single rows and fragments are rendered as body-only tables (no header)
-- **Edits** — Table updates live when a message is edited
-- **Old messages** — Already-sent tables render automatically on channel open and on client restart
-- **Code block awareness** — Pipe characters inside triple-backtick code blocks are ignored
-- **Theme-aware** — Uses Discord's CSS custom properties (`--background-surface-high`, `--background-base-lowest`, `--text-normal`, etc.) to match light and dark themes
+- **Tables** — Pipe-delimited tables render as styled HTML tables inline with the message content
+- **Full GFM table spec** — Supports headers, separators, alignment markers (`:---`, `:---:`, `---:`), and partial/continuation tables
+- **Column-consistent parsing** — Mismatched column counts produce separate tables instead of garbled output
+- **Inline code awareness** — Pipes inside backtick-delimited code spans (`` `| code |` ``) don't trigger table detection
+- **Leading/trailing text** — Text before or after the pipe structure on any row is preserved and rendered naturally
+- **Pagination markers** — Discord's auto-appended `(1/2)` markers render as text below the table instead of breaking it
+- **Edits** — Tables update live when a message is edited (reactive getter re-evaluates on every read)
+- **Old messages** — Already-sent tables render automatically on channel open, scroll, and client restart
+- **MessageLogger compatible** — Tables render in MessageLogger's edit history via a `Parser.parse` wrapper
+- **Full markdown in cells** — Bold, italic, inline code, links, and Discord mentions all render inside table cells
+- **Markdown in mixed messages** — Headings, lists, code blocks, and links render correctly alongside tables
+- **Theme-aware** — Uses Discord's CSS custom properties to match light and dark themes
 
 ## How It Works
 
-Discord exposes a property, `customRenderedContent`, on each message object. If present the message renderer uses it instead of Discord's normal markdown parser. BetterMarkdown listens for Flux events (`MESSAGE_CREATE`, `MESSAGE_UPDATE`, `LOAD_MESSAGES_SUCCESS`, `CHANNEL_SELECT`) and installs a reactive getter for `customRenderedContent` on any message whose raw content contains pipe-delimited table rows.
+**Two interception points:**
 
-The getter checks the message's current content on every read, so edits automatically update without any special handling. For already-loaded messages (on restart or channel switch) the plugin iterates the message store and forces a re-render via `MessageStore.emitChange()`.
+1. **Flux event interception** — Listens for `MESSAGE_CREATE`, `MESSAGE_UPDATE`, `LOAD_MESSAGES_SUCCESS`, `CHANNEL_SELECT`, and `CONNECTION_OPEN` to install a reactive getter for `customRenderedContent` on any message whose raw content contains pipe-delimited table rows. The getter checks `this.content` on every read, so edits automatically re-render without any special handling.
 
-No modifications to Discord's markdown parser. No fragile webpack patches.
+2. **`Parser.parse` wrapper** — Wraps Discord's native markdown parser so tables also render in MessageLogger edit history, channel topics, and any other context that calls `Parser.parse` directly. Live messages use the getter path, so there's no risk of double-processing.
+
+No fragile webpack patches. Pure Flux events and `Object.defineProperty`.
 
 ## Installation
 
@@ -50,7 +58,7 @@ pnpm build --watch    # auto-rebuilds on save
 # Ctrl+R in Discord to see changes
 ```
 
-Debug logs in the console are prefixed with `[BetterMarkdown]`.
+Debug logs are prefixed with `[Vencord] BetterMarkdown` (uses Vencord's `@utils/Logger`).
 
 ## License
 

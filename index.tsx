@@ -1,9 +1,28 @@
 /*
- * BetterMarkdown - Renders markdown tables inline by intercepting
- * Flux MESSAGE_CREATE, MESSAGE_UPDATE, and LOAD_MESSAGES_SUCCESS
- * events to install a reactive getter for customRenderedContent.
- * Also wraps Parser.parse so tables render anywhere Discord's
- * markdown parser is called (MessageLogger edit history, etc.).
+ * BetterMarkdown — Renders GFM-style markdown tables inline in Discord messages.
+ *
+ * Architecture (two interception points):
+ * 1. Flux event interception — Listens for MESSAGE_CREATE, MESSAGE_UPDATE,
+ *    LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT, and CONNECTION_OPEN to install a
+ *    reactive getter for customRenderedContent on messages with table syntax.
+ * 2. Parser.parse wrapper — Intercepts all calls to Discord's markdown parser
+ *    so tables also render in MessageLogger edit history and any other context
+ *    that calls Parser.parse directly.
+ *
+ * Parsing strategy:
+ * - Single-pass content block parser (parseContentBlocks) splits a message into
+ *   alternating text and table blocks by scanning lines.
+ * - Table rows are detected via regex that captures the clean pipe structure
+ *   (groups 1/2/3: leading text, pipe structure, trailing text).
+ * - Inline code awareness: pipes inside backtick-delimited spans are excluded
+ *   from table detection via code-stripped regex testing.
+ * - Salvage fallback: when column counts don't match across a table run, the
+ *   salvage path re-slices the lines and tries to parse header lines as a
+ *   body-only table, then separator+body as another body-only table.
+ * - Column consistency is enforced: mismatched rows produce separate tables.
+ *
+ * TODO (future): Replace salvage fallback with a two-pass lexer + parser
+ * architecture (tokenize once, parse blocks once — no re-slicing).
  */
 
 import definePlugin from "@utils/types";
@@ -20,16 +39,23 @@ type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] };
 
-// Regex that captures the clean pipe structure and any surrounding content
-// Group 1: leading text before the table structure
-// Group 2: the clean pipe-delimited structure (starts and ends with |)
-// Group 3: trailing text after the table structure
+// TABLE_ROW_RE captures three groups from a line containing a pipe-delimited structure:
+//   [1] Leading text before the first | (may be empty)
+//   [2] The clean pipe-delimited structure — from the first | to the last |  
+//   [3] Trailing text after the last | (pagination markers, comments, etc.)
+//
+// Example: "some text | a | b | c | (1/2)"
+//   [1] = "some text "
+//   [2] = "| a | b | c |"
+//   [3] = " (1/2)"
 const TABLE_ROW_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
 
 function isTableRow(l: string): boolean {
     const t = l.trim();
     if (!TABLE_ROW_RE.test(t)) return false;
-    // Pipes inside inline code backticks shouldn't count as table syntax
+    // Strip all inline code (paired backtick groups like ``, ``, `````) before
+    // testing the regex. This prevents false positives where all visible pipes
+    // are inside backtick-delimited code spans (e.g., `` `| code |` ``).
     return TABLE_ROW_RE.test(t.replace(/(`+)[\s\S]*?\1/g, ""));
 }
 function isSeparator(l: string): boolean {
@@ -38,13 +64,17 @@ function isSeparator(l: string): boolean {
 }
 function splitCells(l: string): string[] {
     // Strip inline code before regex match — prevents the first | inside
-    // backticks from being mistaken for the start of the table structure
+    // backticks from being mistaken for the start of the table structure.
+    // Since we operate on the already-stripped struct (group [2]), a simple
+    // backtick toggle is sufficient — any remaining backticks are single
+    // characters inside cell content, not real code delimiters.
     const clean = l.trim().replace(/(`+)[\s\S]*?\1/g, "");
     const m = clean.match(TABLE_ROW_RE);
     if (!m) return [];
     const struct = m[2];
-    // Walk character by character, tracking backtick state
-    // so pipes inside inline code aren't treated as cell boundaries
+    // Walk the struct character by character, tracking backtick state
+    // so pipes inside inline code aren't treated as cell boundaries.
+    // Skip index 0 (the leading |) since we only care about content.
     const cells: string[] = [];
     let cell = "";
     let inCode = false;
@@ -89,8 +119,12 @@ function parseContentBlocks(c: string): ContentBlock[] {
             const trailing: string[] = [];
             while (i < lines.length && isTableRow(lines[i])) {
                 const raw = lines[i].trim();
-                // Extract leading text from the ORIGINAL line by walking chars,
-                // tracking backtick state so inline code content is preserved
+                // Extract leading text from the ORIGINAL line (before code stripping)
+                // by walking characters with backtick delimiter-pair matching.
+                // This preserves inline code content like `` ``| code |`` `` in leading
+                // text, while still recognizing pipes outside of code as the boundary.
+                // We only capture leading text from the first row of a table block —
+                // subsequent rows within the same table don't have independent leading text.
                 let lead = "";
                 if (tl.length === 0) {
                     let inCode = false;
@@ -133,8 +167,17 @@ function parseContentBlocks(c: string): ContentBlock[] {
                 if (trailing.length > 0)
                     blocks.push({ type: "text", text: trailing.join(" ") });
             } else {
-                // Salvage: push leading text, try to parse header lines
-                // as body-only, then parse separator+body
+                // Salvage: parseSingleTable returned null — column counts don't match.
+                // This happens when consecutive table-like lines have different column counts
+                // (e.g., a 2-cell header above a 4-cell body). Try to recover by:
+                //   1. Pushing any accumulated leading text
+                //   2. Parsing header lines before the separator as a body-only table
+                //   3. Parsing separator+body as another body-only table
+                //
+                // Example: "| a | real | table |"  (2 cells)
+                //          "|---|---|---|---|"      (4-cell sep — mismatch!)
+                //          "| works | fine | ✅ | test |" (4 cells)
+                // Produces: 2-column body table + 4-column body table
                 const salSep = tl.findIndex(l => isSeparator(l));
                 if (salSep >= 0) {
                     if (leading.length > 0)
@@ -169,14 +212,16 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
 
     if (sepIdx >= 0) {
         if (sepIdx === 0) {
-            // Separator is the first line — no header, all subsequent rows are body
+            // Case 1: Separator-first (no header row). All subsequent lines are body.
+            // Example: "|---|---|---|\n| a | b | c |"
             const b = lines.slice(1).map(l => splitCells(l));
             if (b.length === 0) return null;
             const cellCount = b[0].length;
             if (cellCount < 2 || b.some(r => r.length !== cellCount)) return null;
             return { header: [], body: b };
         }
-        // Full table: header + separator + body
+        // Case 2: Full table with header + separator + body.
+        // Example: "| A | B |\n|---|---|\n| 1 | 2 |"
         const h = splitCells(lines[0]);
         const b = lines.slice(sepIdx + 1).map(l => splitCells(l));
         if (h.length < 1) return null;
@@ -184,7 +229,8 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
         return { header: h, body: b };
     }
 
-    // No separator: all rows are body (partial table continuation)
+    // Case 3: No separator — all rows are body (partial table / continuation).
+    // Example: "| 1 | 2 |\n| 3 | 4 |"
     const cellCount = splitCells(lines[0]).length;
     if (cellCount < 2) return null;
     const b = lines.map(l => splitCells(l));
@@ -196,7 +242,7 @@ function TableComponent({ header, body }: { header: string[]; body: string[][] }
     return (<div style={{ marginTop: 4, marginBottom: 4, overflow: "hidden", borderRadius: 4, border: "2px solid var(--background-surface-high)", background: "var(--background-secondary)", color: "var(--text-normal)", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
             {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
-            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
+            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "transparent" }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
         </table></div>);
 }
 function renderContent(blocks: ContentBlock[]): React.ReactNode {
@@ -217,8 +263,11 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
     return React.createElement(React.Fragment, null, ...ch);
 }
 
-// Install reactive getter on a message so customRenderedContent always
-// reflects current content (handles edits + fresh loads automatically).
+// Install a reactive getter for customRenderedContent on a message object.
+// The getter re-evaluates this.content on every read, so table rendering
+// automatically updates when the message is edited — no MESSAGE_UPDATE
+// handler needed for the getter itself (the Flux handler still handles the
+// initial detection and edge cases).
 function installGetter(msg: any): boolean {
     if (!msg?.content || typeof msg.content !== "string") return false;
     if (!hasTableSyntax(msg.content)) return false;
@@ -239,7 +288,11 @@ function installGetter(msg: any): boolean {
     return true;
 }
 
-// Handle a message or message batch from any event source
+// Handle a message or message batch from any Flux event source.
+// Sets customRenderedContent on the raw event data (sync — store copies this
+// into the new Message object) and also installs a reactive getter on the
+// stored message in MessageStore (async/microtask — in case the event data
+// is a shallow copy that won't persist).
 function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
@@ -310,9 +363,11 @@ export default definePlugin({
         logger.log("start()");
 
         // Wrap Parser.parse so tables render anywhere Discord's markdown
-        // parser is called — MessageLogger edit history, channel topics, etc.
+        // parser is called — MessageLogger edit history, channel topics,
+        // and any other context that calls Parser.parse directly.
+        // Live messages use the customRenderedContent getter (above),
+        // so there's no risk of double-processing.
         _origParse = Parser.parse;
-        const self = this;
         Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
             if (typeof content !== "string" || !hasTableSyntax(content)) {
                 return _origParse!.call(this, content, inline, opts);
@@ -334,6 +389,10 @@ export default definePlugin({
         };
 
         if (!FluxDispatcher) return;
+        // Subscribe to Flux events to catch messages across all contexts.
+        // MESSAGE_CREATE/UPDATE handle live and edited messages.
+        // LOAD_MESSAGES_SUCCESS/CHANNEL_SELECT/CHANNEL_OPEN handle
+        // already-loaded messages (scrolling, switching channels, restart).
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
             FluxDispatcher.subscribe("MESSAGE_UPDATE", (d: any) => handleMsg(d.channelId, d.message, "UPDATE")),
