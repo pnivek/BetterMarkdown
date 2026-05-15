@@ -133,12 +133,17 @@ function parseContentBlocks(c: string): ContentBlock[] {
                 if (trailing.length > 0)
                     blocks.push({ type: "text", text: trailing.join(" ") });
             } else {
-                // Try to salvage from a column-count mismatch:
-                // parse the separator + body as a body-only table
+                // Salvage: push leading text, try to parse header lines
+                // as body-only, then parse separator+body
                 const salSep = tl.findIndex(l => isSeparator(l));
                 if (salSep >= 0) {
                     if (leading.length > 0)
                         blocks.push({ type: "text", text: leading.join(" ") });
+                    if (salSep > 0) {
+                        const hp = parseSingleTable(tl.slice(0, salSep));
+                        if (hp) blocks.push({ type: "table", header: hp.header, body: hp.body });
+                        else blocks.push({ type: "text", text: tl.slice(0, salSep).join("\n") });
+                    }
                     const bp = parseSingleTable(tl.slice(salSep));
                     if (bp) {
                         blocks.push({ type: "table", header: bp.header, body: bp.body });
