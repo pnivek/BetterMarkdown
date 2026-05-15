@@ -107,6 +107,8 @@ function tryParseTableRow(raw: string): LineToken | null {
     let codeDelim: number | null = null;
     // Quote tracking: prevents pipes inside double-quoted strings like
     // \`searching: "query1|query2|query3"\` from being treated as cell boundaries.
+    // Handles straight quotes (U+0022) and curly quotes (U+201C/U+201D) —
+    // agent tool output often uses typographic quotes.
     let inQuote = false;
     let i = 0;
 
@@ -134,8 +136,10 @@ function tryParseTableRow(raw: string): LineToken | null {
             continue;
         }
 
-        // Double-quote toggle — only affects behavior outside inline code
-        if (ch === '"' && codeDelim === null) {
+        // Double-quote toggle — only affects behavior outside inline code.
+        // Handles straight (U+0022) and curly (U+201C/U+201D) quotes since
+        // agent/CLI tool output often uses typographic quotation marks.
+        if (codeDelim === null && (ch === '"' || ch === "“" || ch === "”")) {
             inQuote = !inQuote;
         }
 
