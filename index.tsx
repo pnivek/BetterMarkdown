@@ -53,6 +53,23 @@ function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
 }
 
+// GFM task list item parser. Detects `- [ ]`, `- [x]`, `- [X]`, `* [ ]`, `+ [ ]`.
+// Strips inline code before matching to avoid false positives like
+// `` `- [ ] this is code, not a task` ``. Extracts the text from the original
+// line to preserve inline code content in the item text.
+function tryParseTaskListItem(raw: string): LineToken | null {
+    const line = raw.trim();
+    const clean = line.replace(/(`+)[\s\S]*?\1/g, "");
+    const m = clean.match(TASK_ITEM_RE);
+    if (!m) return null;
+    const checked = m[2] === "x" || m[2] === "X";
+    // Prefix offset is the same between clean and original since no backticks
+    // appear before the text starts in a valid task list line.
+    const prefixEnd = m.index! + m[0].length - m[3].length;
+    const text = line.slice(prefixEnd).trim();
+    return { kind: "task_list_item", checked, text };
+}
+
 // ---------------------------------------------------------------------------
 // Lexer: single-pass tokenizer with stack-based code-awareness.
 // Produces LineToken[] — each table_row token already has cells extracted.
