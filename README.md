@@ -6,7 +6,7 @@ A Vencord plugin that extends Discord's markdown rendering with GFM features the
 
 | Feature | Syntax | Notes |
 |---|---|---|
-| Tables | `\| A \| B \|`<br>`\|---\|---\|`<br>`\| 1 \| 2 \|` | Full GFM spec — headers, separators, alignment, inline code awareness |
+| Tables | `\| A \| B \|`<br>`\|---\|---\|`<br>`\| 1 \| 2 \|` | Full GFM spec — headers, separators, alignment |
 | Column alignment | `\| :--- \| :---: \| ---: \|` | Left, center, right |
 | Escaped pipes | `\| a \| b \| c \|` | `\|` in table cells without breaking the column |
 | Task lists | `- [ ] todo`<br>`- [x] done` | Styled checkboxes, backtick-aware |
