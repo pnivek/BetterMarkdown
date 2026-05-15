@@ -2,23 +2,19 @@
  * BetterMarkdown - Renders markdown tables inline by intercepting
  * Flux MESSAGE_CREATE, MESSAGE_UPDATE, and LOAD_MESSAGES_SUCCESS
  * events to install a reactive getter for customRenderedContent.
+ * Also wraps Parser.parse so tables render anywhere Discord's
+ * markdown parser is called (MessageLogger edit history, etc.).
  */
 
 import definePlugin from "@utils/types";
-import { FluxDispatcher } from "@webpack/common";
+import { FluxDispatcher, Parser, React } from "@webpack/common";
 import { findByPropsLazy } from "@webpack";
-import { React } from "@webpack/common";
 import { Logger } from "@utils/Logger";
 
 const logger = new Logger("BetterMarkdown", "#a6d189");
 
 const MessageStore = findByPropsLazy("getMessage", "getMessages");
 const SelectedChannelStore = findByPropsLazy("getChannelId");
-
-// Discord's markdown parser - find the module that has a parse function
-let _parse: (text: string, inline: boolean, opts: any) => any = (t) => t;
-try { const m: any = findByPropsLazy("parse"); if (m?.parse) _parse = (t, i, o) => m.parse(t, i, o); } catch {}
-// If none found, _parse remains identity fallback (text won't have markdown rendering)
 
 type ContentBlock =
     | { type: "text"; text: string }
@@ -91,7 +87,6 @@ function parseContentBlocks(c: string): ContentBlock[] {
             while (i < lines.length && isTableRow(lines[i])) {
                 const raw = lines[i].trim();
                 const m = raw.match(TABLE_ROW_RE);
-                // Only capture leading text from the first row of the table block
                 if (tl.length === 0 && m?.[1]?.trim()) leading.push(m[1].trim());
                 tl.push(raw);
                 if (m?.[3]?.trim()) trailing.push(m[3].trim());
@@ -137,21 +132,24 @@ function parseSingleTable(lines: string[]): { header: string[]; body: string[][]
     return { header: [], body: b };
 }
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
+    const inlineOpts = { allowLinks: true, allowList: true };
     return (<div style={{ marginTop: 4, marginBottom: 4, overflow: "hidden", borderRadius: 4, border: "2px solid var(--background-surface-high)", background: "var(--background-secondary)", color: "var(--text-normal)", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-surface-high)" }}>{_parse(c, true, {}) ?? c}</th>)}</tr></thead>}
-            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)" }}>{_parse(c, true, {}) ?? c}</td>)}</tr>)}</tbody>}
+            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
+            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
         </table></div>);
 }
 function renderContent(blocks: ContentBlock[]): React.ReactNode {
+    const textOpts = { allowHeading: true, allowLinks: true, allowList: true, allowEmojiLinks: true };
+
     if (blocks.length === 1 && blocks[0].type === "text")
-        return _parse(blocks[0].text, false, {});
+        return Parser.parse(blocks[0].text, false, textOpts);
 
     const ch: React.ReactNode[] = [];
     for (const b of blocks) {
         if (b.type === "text") {
             ch.push(React.createElement(React.Fragment, { key: ch.length },
-                _parse(b.text, false, {})));
+                Parser.parse(b.text, false, textOpts)));
         } else {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
         }
@@ -238,9 +236,11 @@ function processChannel(chId: string, source: string) {
     }
 }
 
+let _origParse: typeof Parser.parse | null = null;
+
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables inline via customRenderedContent",
+    description: "Renders markdown tables inline via customRenderedContent and wraps Parser.parse for table support in MessageLogger and other contexts",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
@@ -248,6 +248,31 @@ export default definePlugin({
 
     start() {
         logger.log("start()");
+
+        // Wrap Parser.parse so tables render anywhere Discord's markdown
+        // parser is called — MessageLogger edit history, channel topics, etc.
+        _origParse = Parser.parse;
+        const self = this;
+        Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
+            if (typeof content !== "string" || !hasTableSyntax(content)) {
+                return _origParse!.call(this, content, inline, opts);
+            }
+            const blocks = parseContentBlocks(content);
+            if (blocks.length === 1 && blocks[0].type === "text") {
+                return _origParse!.call(this, content, inline, opts);
+            }
+            const ch: React.ReactNode[] = [];
+            for (const b of blocks) {
+                if (b.type === "text") {
+                    ch.push(React.createElement(React.Fragment, { key: ch.length },
+                        _origParse!.call(this, b.text, inline, opts)));
+                } else {
+                    ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+                }
+            }
+            return React.createElement(React.Fragment, null, ...ch);
+        };
+
         if (!FluxDispatcher) return;
         this._unsubs = [
             FluxDispatcher.subscribe("MESSAGE_CREATE", (d: any) => handleMsg(d.channelId, d.message, "CREATE")),
@@ -272,5 +297,10 @@ export default definePlugin({
     stop() {
         this._unsubs.forEach(u => u());
         this._unsubs = [];
+        // Restore original Parser.parse
+        if (_origParse && Parser.parse !== _origParse) {
+            Parser.parse = _origParse;
+            _origParse = null;
+        }
     },
 });
