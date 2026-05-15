@@ -158,11 +158,40 @@ function tryParseTableRow(raw: string): LineToken | null {
     // Never entered the cells phase → not a table row
     if (phase === "leading") return null;
 
-    // Need at least 2 cells (single pipe produces 2 cells minimum)
-    if (cells.length < 2 && cell.trim() === "") return null;
+    // --- Post-processing: use code-stripped line to determine the real ---
+    // --- cell/trailing boundary. The character walk above preserves inline ---
+    // --- code values but can't distinguish the Nth cell from trailing text. ---
+    const clean = line.replace(/(`+)[\s\S]*?\1/g, "");
+    const STRUCT_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
+    const sm = clean.match(STRUCT_RE);
+    if (!sm) return null;
 
-    // Push the final cell if there's residual content after the last |
-    if (cell.trim() || cells.length > 0) cells.push(cell.trim());
+    // Number of data cells = pipes in group 2 minus the leading pipe
+    // "| a | b |" → 3 pipes → 2 cells
+    const pipeCount = (sm[2].match(/\|/g) || []).length;
+    const structCellCount = Math.max(1, pipeCount - 1);
+    const trailingClean = sm[3]?.trim() || "";
+
+    // If we extracted more cells than the structure allows, the extras
+    // are actually trailing text. Move them from cells → trailing.
+    while (cells.length > structCellCount) {
+        const extra = cells.pop()!;
+        trailing = extra + (trailing ? " " + trailing : "");
+    }
+
+    // If the structure shows trailing text but we extracted it as a cell
+    // buffer, move it to trailing.
+    if (trailingClean && !trailing && cell.trim()) {
+        trailing = cell.trim();
+        cell = "";
+    }
+
+    // Push the final cell only if there's actual content.
+    // Don't push an empty string just because cells.length > 0.
+    if (cell.trim()) cells.push(cell.trim());
+
+    // Need at least 2 cells (single pipe produces 2 cells minimum)
+    if (cells.length < 2) return null;
 
     // If every cell is empty the line had no real table content
     if (cells.every(c => c === "")) return null;
