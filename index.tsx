@@ -126,6 +126,20 @@ function parseContentBlocks(c: string): ContentBlock[] {
                 if (trailing.length > 0)
                     blocks.push({ type: "text", text: trailing.join(" ") });
             } else {
+                // Try to salvage from a column-count mismatch:
+                // parse the separator + body as a body-only table
+                const salSep = tl.findIndex(l => isSeparator(l));
+                if (salSep >= 0) {
+                    if (leading.length > 0)
+                        blocks.push({ type: "text", text: leading.join(" ") });
+                    const bp = parseSingleTable(tl.slice(salSep));
+                    if (bp) {
+                        blocks.push({ type: "table", header: bp.header, body: bp.body });
+                        if (trailing.length > 0)
+                            blocks.push({ type: "text", text: trailing.join(" ") });
+                        continue;
+                    }
+                }
                 blocks.push({ type: "text", text: tl.join("\n") });
             }
         } else {
