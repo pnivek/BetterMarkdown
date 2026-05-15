@@ -4,8 +4,9 @@
  * Architecture (two interception points):
  * 1. Flux event interception — Installs a reactive getter for
  *    customRenderedContent on messages with table syntax.
- * 2. Parser.parse wrapper — Wraps Discord's markdown parser so tables
- *    render in MessageLogger edit history and any other context.
+ * 2. Parser.parse wrapper — Wraps Discord's markdown parser so tables,
+ *    task lists, and horizontal rules render in MessageLogger edit history
+ *    and any other context.
  *
  * Parsing strategy (two-pass lexer + parser):
  * - tokenize() — Single pass through content with a stack for nested state
@@ -29,7 +30,7 @@
  * Benefits over the previous approach:
  * - One backtick-tracking implementation (vs 3 before)
  * - No salvage fallback (column mismatch is a natural table boundary)
- * - ContentBlock includes code_block and task_list variants for extensibility
+ * - ContentBlock includes code_block, task_list, and horizontal_rule variants for extensibility
  */
 
 import definePlugin from "@utils/types";
@@ -618,7 +619,7 @@ let _origParse: typeof Parser.parse | null = null;
 
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables inline via customRenderedContent and wraps Parser.parse for table support in MessageLogger and other contexts",
+    description: "Renders GFM tables, task lists, and horizontal rules inline via customRenderedContent and wraps Parser.parse for support across MessageLogger, edit history, and other contexts",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
