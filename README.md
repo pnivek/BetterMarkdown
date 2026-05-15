@@ -1,40 +1,29 @@
 # BetterMarkdown
 
-A [Vencord](https://vencord.dev) plugin that renders tables, task lists, and horizontal rules inline in Discord messages.
+A Vencord plugin that extends Discord's markdown rendering with GFM features the native parser doesn't handle.
 
 ## Features
 
-- **Tables** — Pipe-delimited tables render as styled HTML tables inline with the message content
-- **GFM table spec** — Supports headers, separators, alignment markers (`:---`, `:---:`, `---:`), and partial/continuation tables
-- **Task lists** — `- [ ]` and `- [x]` render as styled checkboxes with proper styling
-- **Horizontal rules** — `---`, `***`, and `___` render as visible HR elements
-- **Escaped pipes** — `\|` inside table cells renders a literal pipe character without triggering a column break
-- **Column-consistent parsing** — Mismatched column counts produce separate tables instead of garbled output
-- **Inline code awareness** — Pipes inside backtick-delimited code spans (`` `| code |` ``) don't trigger table detection
-- **Leading/trailing text** — Text before or after the pipe structure on any row is preserved and rendered naturally
-- **Pagination markers** — Discord's auto-appended `(1/2)` markers render as text below the table instead of breaking it
-- **Edits** — Tables update live when a message is edited (reactive getter re-evaluates on every read)
-- **Old messages** — Already-sent tables render automatically on channel open, scroll, and client restart
-- **MessageLogger compatible** — Tables render in MessageLogger's edit history via a `Parser.parse` wrapper
-- **Full markdown in cells** — Bold, italic, inline code, links, and Discord mentions all render inside table cells
-- **Markdown in mixed messages** — Headings, lists, code blocks, and links render correctly alongside tables
-- **Theme-aware** — Uses Discord's CSS custom properties to match light and dark themes
+| Feature | Syntax | Notes |
+|---|---|---|
+| Tables | `\| A \| B \|`<br>`\|---\|---\|`<br>`\| 1 \| 2 \|` | Full GFM spec — headers, separators, alignment, inline code awareness |
+| Column alignment | `\| :--- \| :---: \| ---: \|` | Left, center, right |
+| Escaped pipes | `\| a \| b \| c \|` | `\|` in table cells without breaking the column |
+| Task lists | `- [ ] todo`<br>`- [x] done` | Styled checkboxes, backtick-aware |
+| Horizontal rules | `---` / `***` / `___` | Themed HR element |
 
-## How It Works
+## How it works
 
-**Two interception points:**
+Two things happen when a message with supported markdown syntax arrives:
 
-1. **Flux event interception** — Listens for `MESSAGE_CREATE`, `MESSAGE_UPDATE`, `LOAD_MESSAGES_SUCCESS`, `CHANNEL_SELECT`, and `CONNECTION_OPEN` to install a reactive getter for `customRenderedContent` on any message whose raw content contains pipe-delimited table rows. The getter checks `this.content` on every read, so edits automatically re-render without any special handling.
+1. **Flux interception** — Listens for message events and installs a reactive getter. The getter re-evaluates on every read, so edits, old messages on scroll, and channel switches all just work.
+2. **Parser wrapper** — Wraps Discord's markdown parser so rendered elements also show up in MessageLogger edit history and anywhere else `Parser.parse` is called.
 
-2. **`Parser.parse` wrapper** — Wraps Discord's native markdown parser so tables also render in MessageLogger edit history, channel topics, and any other context that calls `Parser.parse` directly. Live messages use the getter path, so there's no risk of double-processing.
+Theme-aware out of the box — uses Discord's CSS variables to match light and dark mode.
 
-No fragile webpack patches. Pure Flux events and `Object.defineProperty`.
+## Install
 
-## Installation
-
-### Prerequisites
-
-You need Vencord installed from source (dev build).
+You need Vencord from source:
 
 ```bash
 git clone https://github.com/Vendicated/Vencord
@@ -43,7 +32,7 @@ pnpm install
 pnpm inject
 ```
 
-### Install the plugin
+Then clone this repo into userplugins:
 
 ```bash
 cd Vencord/src/userplugins
@@ -52,16 +41,16 @@ cd ../..
 pnpm build
 ```
 
-Then `Ctrl+R` in Discord to reload.
+`Ctrl+R` in Discord to reload.
 
-## Development
+## Dev
 
 ```bash
-pnpm build --watch    # auto-rebuilds on save
-# Ctrl+R in Discord to see changes
+pnpm build --watch   # auto-rebuilds on save
+# Ctrl+R to see changes
 ```
 
-Debug logs are prefixed with `[Vencord] BetterMarkdown` (uses Vencord's `@utils/Logger`).
+Debug logs use Vencord's `@utils/Logger` — prefixed with `[BetterMarkdown]`.
 
 ## License
 
