@@ -1,28 +1,4 @@
-/*
- * BetterMarkdown — Renders GFM-style markdown tables inline in Discord messages.
- *
- * Architecture (two interception points):
- * 1. Flux event interception — Installs a reactive getter for
- *    customRenderedContent on messages with table syntax.
- * 2. Parser.parse wrapper — Wraps Discord's markdown parser so tables
- *    render in MessageLogger edit history and any other context.
- *
- * Parsing strategy (two-pass lexer + parser):
- * - tokenize() — Single pass through content with a stack for nested state
- *   (code blocks). Produces line-level tokens: code_block_fence, table_row
- *   (with pre-extracted cells + leading/trailing text), or text.
- * - tryParseTableRow() — Backtick delimiter-pair matching (stack semantics)
- *   extracts cells from the original line preserving inline code content.
- * - parse() — Walks tokens, assembles ContentBlocks. Table rows group by
- *   column count match — no salvage fallback, no re-slicing.
- * - buildTables() — Column-aware table builder, splits on count mismatch.
- * - isSeparatorCells() — Stateless check on pre-extracted cell arrays.
- *
- * Benefits over the previous approach:
- * - One backtick-tracking implementation (vs 3 before)
- * - No salvage fallback (column mismatch is a natural table boundary)
- * - ContentBlock includes code_block variant for future extensibility
- */
+// Intercepts Flux events to render GFM tables, task lists, and horizontal rules
 
 import definePlugin from "@utils/types";
 import { FluxDispatcher, Parser, React } from "@webpack/common";
@@ -36,16 +12,73 @@ const SelectedChannelStore = findByPropsLazy("getChannelId");
 
 type ContentBlock =
     | { type: "text"; text: string }
-    | { type: "table"; header: string[]; body: string[][] }
+    | { type: "table"; header: string[]; body: string[][]; alignment?: ("left" | "center" | "right" | null)[] }
+    | { type: "task_list"; items: { checked: boolean; text: string }[] }
+    | { type: "horizontal_rule" }
     | { type: "code_block"; content: string; fence: string };
 
 type LineToken =
     | { kind: "code_block_fence"; fence: string }
     | { kind: "table_row"; cells: string[]; leading: string; trailing: string }
+    | { kind: "task_list_item"; checked: boolean; text: string }
+    | { kind: "horizontal_rule" }
     | { kind: "text"; content: string };
+
+// Task list item regex
+const TASK_ITEM_RE = /^(-|\*|\+)\s+\[([ xX])\]\s+(.*)$/;
+
+// GFM horizontal rule regex: 3+ dashes, asterisks, or underscores (with optional spaces)
+// The line must contain ONLY these characters and spaces.
+const HR_RE = /^\s*[-*_](?:\s*[-*_]){2,}\s*$/;
 
 function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
+}
+
+// Extracts per-column text alignment from a GFM separator row.
+//   :---  → left
+//   :---: → center
+//   ---:  → right
+//   ----  → null (browser default — left for <th>)
+function getColumnAlignment(cells: string[]): ("left" | "center" | "right" | null)[] {
+    return cells.map(c => {
+        const t = c.trim();
+        const left = t.startsWith(":");
+        const right = t.endsWith(":");
+        if (left && right) return "center";
+        if (left) return "left";
+        if (right) return "right";
+        return null;
+    });
+}
+
+// GFM task list item parser. Detects `- [ ]`, `- [x]`, `- [X]`, `* [ ]`, `+ [ ]`.
+// Strips inline code before matching to avoid false positives like
+// `` `- [ ] this is code, not a task` ``. Extracts the text from the original
+// line to preserve inline code content in the item text.
+function tryParseTaskListItem(raw: string): LineToken | null {
+    const line = raw.trim();
+    const clean = line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\\|/g, "");
+    const m = clean.match(TASK_ITEM_RE);
+    if (!m) return null;
+    const checked = m[2] === "x" || m[2] === "X";
+    // Prefix offset matches clean/original since no backticks precede `- [ ]`
+    const prefixEnd = m.index! + m[0].length - m[3].length;
+    const text = line.slice(prefixEnd).trim();
+    return { kind: "task_list_item", checked, text };
+}
+
+// GFM horizontal rule parser. Detects lines consisting of 3+ dashes,
+// asterisks, or underscores (with optional spaces). Such lines are rendered
+// as a visual separator in Discord.
+// Placed after tryParseTableRow / tryParseTaskListItem so that table separator
+// lines (\`|---|---|\`) and task list items (\`- [ ] text\`) take priority.
+function tryParseHorizontalRule(raw: string): LineToken | null {
+    const line = raw.trim();
+    if (HR_RE.test(line)) {
+        return { kind: "horizontal_rule" };
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,19 +112,19 @@ function tokenize(content: string): LineToken[] {
             continue;
         }
 
-        // Outside code — try to parse as a table row
+        // Outside code — try table first, then task list, then plain text
         const row = tryParseTableRow(rawLine);
-        tokens.push(row ?? { kind: "text", content: rawLine });
+        if (row) { tokens.push(row); continue; }
+        const task = tryParseTaskListItem(rawLine);
+        if (task) { tokens.push(task); continue; }
+        const hr = tryParseHorizontalRule(rawLine);
+        tokens.push(hr ?? { kind: "text", content: rawLine });
     }
 
     return tokens;
 }
 
-// Character-by-character table row parser with backtick delimiter-pair
-// matching (stack semantics). Three phases:
-//   1. leading — text before the first unquoted pipe
-//   2. cells   — content between pipes (IS cell content)
-//   3. trailing — text after the last unquoted pipe
+// Character-walk table row parser with backtick-pair matching. Phases: leading, cells, trailing
 function tryParseTableRow(raw: string): LineToken | null {
     const line = raw.trim();
 
@@ -102,13 +135,9 @@ function tryParseTableRow(raw: string): LineToken | null {
     let phase: "leading" | "cells" | "trailing" = "leading";
 
     // Stack-based inline code tracking:
-    //   null  → not inside inline code
-    //   number → inside code, opened by N consecutive backticks
+    // null = outside code, number = inside code opened by N backticks
     let codeDelim: number | null = null;
-    // Quote tracking: prevents pipes inside double-quoted strings like
-    // \`searching: "query1|query2|query3"\` from being treated as cell boundaries.
-    // Handles straight quotes (U+0022) and curly quotes (U+201C/U+201D) —
-    // agent tool output often uses typographic quotes.
+    // Tracks straight and curly double-quotes to suppress pipe boundaries in quoted strings
     let inQuote = false;
     let i = 0;
 
@@ -136,11 +165,18 @@ function tryParseTableRow(raw: string): LineToken | null {
             continue;
         }
 
-        // Double-quote toggle — only affects behavior outside inline code.
-        // Handles straight (U+0022) and curly (U+201C/U+201D) quotes since
-        // agent/CLI tool output often uses typographic quotation marks.
+        // Toggle inQuote on straight or curly double-quotes (outside code only)
         if (codeDelim === null && (ch === '"' || ch === "“" || ch === "”")) {
             inQuote = !inQuote;
+        }
+
+        // Escaped pipe: \| outside code/quotes = literal pipe, not column break
+        if (ch === '\\' && i + 1 < line.length && line[i + 1] === '|' && codeDelim === null && !inQuote) {
+            if (phase === 'leading') leading += '|';
+            else if (phase === 'cells') cell += '|';
+            else trailing += '|';
+            i += 2;
+            continue;
         }
 
         // Pipe outside of inline code AND outside of quotes → phase transition
@@ -170,10 +206,10 @@ function tryParseTableRow(raw: string): LineToken | null {
     // Never entered the cells phase → not a table row
     if (phase === "leading") return null;
 
-    // --- Post-processing: use code-stripped line to determine the real ---
-    // --- cell/trailing boundary. The character walk above preserves inline ---
-    // --- code values but can't distinguish the Nth cell from trailing text. ---
-    const clean = line.replace(/(`+)[\s\S]*?\1/g, "");
+    // --- Post-processing: use code/escape-stripped line to determine the real ---
+    // --- cell/trailing boundary. Escaped pipes (\|) are removed since the ---
+    // --- character walk already consumed them as literal cell content. ---
+    const clean = line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\\|/g, "");
     const STRUCT_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
     const sm = clean.match(STRUCT_RE);
     if (!sm) return null;
@@ -229,7 +265,7 @@ function parse(tokens: LineToken[]): ContentBlock[] {
         const t = tokens[i];
 
         if (t.kind === "code_block_fence") {
-            // Collect entire code block: opening fence + content + closing fence
+            // Collect entire code block
             const fence = t.fence;
             const codeLines: string[] = [t.fence];
             i++;
@@ -273,6 +309,26 @@ function parse(tokens: LineToken[]): ContentBlock[] {
             continue;
         }
 
+        if (t.kind === "horizontal_rule") {
+            blocks.push({ type: "horizontal_rule" });
+            i++;
+            continue;
+        }
+
+        if (t.kind === "task_list_item") {
+            // Collect consecutive task items into a single task_list block
+            const items: { checked: boolean; text: string }[] = [];
+
+            while (i < tokens.length && tokens[i].kind === "task_list_item") {
+                const ti = tokens[i] as Extract<LineToken, { kind: "task_list_item" }>;
+                items.push({ checked: ti.checked, text: ti.text });
+                i++;
+            }
+
+            blocks.push({ type: "task_list", items });
+            continue;
+        }
+
         // Plain text — accumulate until next non-text token
         const textLines: string[] = [];
         while (i < tokens.length && tokens[i].kind === "text") {
@@ -311,10 +367,12 @@ function buildTables(
                 bodyRows.every(r => r.cells.length === header.length);
 
             if (bodyOk && header.length >= 1) {
+                const alignment = getColumnAlignment(rows[absSep].cells);
                 blocks.push({
                     type: "table",
                     header,
                     body: bodyRows.map(r => r.cells),
+                    alignment,
                 });
                 start = absSep + 1 + bodyRows.length;
                 continue;
@@ -334,17 +392,19 @@ function buildTables(
                    !isSeparatorCells(rows[end].cells)) end++;
 
             if (cellCount >= 2) {
+                const alignment = getColumnAlignment(rows[absSep].cells);
                 blocks.push({
                     type: "table",
                     header: [],
                     body: bodyRows.slice(0, end - (start + 1)).map(r => r.cells),
+                    alignment,
                 });
             }
             start = end;
             continue;
         }
 
-        // Case 3: no separator — body-only table
+        // Case 3: no separator — no alignment info — body-only table
         const cellCount = rows[start].cells.length;
         if (cellCount < 2) {
             // Single cell row → treat as regular text
@@ -366,20 +426,34 @@ function buildTables(
         start = end;
     }
 }
-function hasTableSyntax(c: string): boolean {
-    return tokenize(c).some(t => t.kind === "table_row");
+function needsInterception(c: string): boolean {
+    return tokenize(c).some(t => t.kind === "table_row" || t.kind === "task_list_item" || t.kind === "horizontal_rule");
 }
 
 function parseContentBlocks(c: string): ContentBlock[] {
     return parse(tokenize(c));
 }
-function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
+function TableComponent({ header, body, alignment }: { header: string[]; body: string[][]; alignment?: ("left" | "center" | "right" | null)[] }) {
     const inlineOpts = { allowLinks: true, allowList: true };
+    const align = (i: number): string => alignment?.[i] ?? "left";
     return (<div style={{ marginTop: 4, marginBottom: 4, overflow: "hidden", borderRadius: 4, border: "2px solid var(--background-surface-high)", background: "var(--background-secondary)", color: "var(--text-normal)", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
-            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
+            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: align(i) as any, fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
+            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)", textAlign: align(ci) as any }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
         </table></div>);
+}
+function TaskListComponent({ items }: { items: { checked: boolean; text: string }[] }) {
+    const inlineOpts = { allowLinks: true, allowList: true };
+    return (<div style={{ marginTop: 4, marginBottom: 4, background: "var(--background-secondary)", borderRadius: 4, padding: "4px 0", color: "var(--text-normal)", fontFamily: "var(--font-primary)", fontSize: 13 }}>
+        {items.map((item, i) => (<div key={i} style={{ display: "flex", alignItems: "center", padding: "4px 12px", gap: 8 }}>
+            <span style={{ flexShrink: 0, width: 18, height: 18, borderRadius: 3, border: item.checked ? "none" : "2px solid var(--text-muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", background: item.checked ? "var(--green-360)" : "transparent" }}>
+                {item.checked ? "✓" : ""}
+            </span>
+            <span style={{ textDecoration: item.checked ? "line-through" : "none", opacity: item.checked ? 0.6 : 1, color: "var(--text-normal)" }}>
+                {Parser.parse(item.text, true, inlineOpts) ?? item.text}
+            </span>
+        </div>))}
+    </div>);
 }
 function renderContent(blocks: ContentBlock[]): React.ReactNode {
     const textOpts = { allowHeading: true, allowLinks: true, allowList: true, allowEmojiLinks: true };
@@ -393,7 +467,14 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
             ch.push(React.createElement(React.Fragment, { key: ch.length },
                 Parser.parse(b.text, false, textOpts)));
         } else if (b.type === "table") {
-            ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+            ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
+        } else if (b.type === "horizontal_rule") {
+            ch.push(React.createElement("div", {
+                key: ch.length,
+                style: { height: 0, borderBottom: "2px solid var(--background-surface-high)", margin: "8px 0" }
+            }));
+        } else if (b.type === "task_list") {
+            ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
         } else {
             // code_block — pass through to Discord's parser as-is
             ch.push(React.createElement(React.Fragment, { key: ch.length },
@@ -410,12 +491,12 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
 // initial detection and edge cases).
 function installGetter(msg: any): boolean {
     if (!msg?.content || typeof msg.content !== "string") return false;
-    if (!hasTableSyntax(msg.content)) return false;
+    if (!needsInterception(msg.content)) return false;
     delete msg.customRenderedContent;
     Object.defineProperty(msg, "customRenderedContent", {
         get() {
             if (!this?.content || typeof this.content !== "string") return void 0;
-            if (!hasTableSyntax(this.content)) return void 0;
+            if (!needsInterception(this.content)) return void 0;
             return {
                 content: renderContent(parseContentBlocks(this.content)),
                 hasSpoilerEmbeds: false,
@@ -436,7 +517,7 @@ function installGetter(msg: any): boolean {
 function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
-    if (!hasTableSyntax(message.content)) return;
+    if (!needsInterception(message.content)) return;
     logger.log(source + ": table in msg", message.id);
 
     // Set on raw event data (store copies to new Message for CREATE)
@@ -493,7 +574,7 @@ let _origParse: typeof Parser.parse | null = null;
 
 export default definePlugin({
     name: "BetterMarkdown",
-    description: "Renders markdown tables inline via customRenderedContent and wraps Parser.parse for table support in MessageLogger and other contexts",
+    description: "Renders GFM tables, task lists, and horizontal rules inline via customRenderedContent and wraps Parser.parse for support across MessageLogger, edit history, and other contexts",
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
@@ -509,7 +590,7 @@ export default definePlugin({
         // so there's no risk of double-processing.
         _origParse = Parser.parse;
         Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
-            if (typeof content !== "string" || !hasTableSyntax(content)) {
+            if (typeof content !== "string" || !needsInterception(content)) {
                 return _origParse!.call(this, content, inline, opts);
             }
             const blocks = parseContentBlocks(content);
@@ -522,7 +603,14 @@ export default definePlugin({
                     ch.push(React.createElement(React.Fragment, { key: ch.length },
                         _origParse!.call(this, b.text, inline, opts)));
                 } else if (b.type === "table") {
-                    ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+                    ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
+                } else if (b.type === "horizontal_rule") {
+                    ch.push(React.createElement("div", {
+                        key: ch.length,
+                        style: { height: 0, borderBottom: "2px solid var(--background-surface-high)", margin: "8px 0" }
+                    }));
+                } else if (b.type === "task_list") {
+                    ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
                 } else {
                     // code_block — pass through to Discord's parser
                     ch.push(React.createElement(React.Fragment, { key: ch.length },
