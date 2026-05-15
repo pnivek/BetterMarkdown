@@ -71,7 +71,7 @@ function isSeparatorCells(cells: string[]): boolean {
 // line to preserve inline code content in the item text.
 function tryParseTaskListItem(raw: string): LineToken | null {
     const line = raw.trim();
-    const clean = line.replace(/(`+)[\s\S]*?\1/g, "");
+    const clean = line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\\|/g, "");
     const m = clean.match(TASK_ITEM_RE);
     if (!m) return null;
     const checked = m[2] === "x" || m[2] === "X";
@@ -194,6 +194,16 @@ function tryParseTableRow(raw: string): LineToken | null {
             inQuote = !inQuote;
         }
 
+        // Escaped pipe — \| outside code/quotes emits a literal | without
+        // triggering a column break, so table cells can contain pipe characters.
+        if (ch === '\' && i + 1 < line.length && line[i + 1] === '|' && codeDelim === null && !inQuote) {
+            if (phase === 'leading') leading += '|';
+            else if (phase === 'cells') cell += '|';
+            else trailing += '|';
+            i += 2;
+            continue;
+        }
+
         // Pipe outside of inline code AND outside of quotes → phase transition
         if (ch === "|" && codeDelim === null && !inQuote) {
             if (phase === "leading") {
@@ -221,10 +231,10 @@ function tryParseTableRow(raw: string): LineToken | null {
     // Never entered the cells phase → not a table row
     if (phase === "leading") return null;
 
-    // --- Post-processing: use code-stripped line to determine the real ---
-    // --- cell/trailing boundary. The character walk above preserves inline ---
-    // --- code values but can't distinguish the Nth cell from trailing text. ---
-    const clean = line.replace(/(`+)[\s\S]*?\1/g, "");
+    // --- Post-processing: use code/escape-stripped line to determine the real ---
+    // --- cell/trailing boundary. Escaped pipes (\|) are removed since the ---
+    // --- character walk already consumed them as literal cell content. ---
+    const clean = line.replace(/(`+)[\s\S]*?\1/g, "").replace(/\\\|/g, "");
     const STRUCT_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
     const sm = clean.match(STRUCT_RE);
     if (!sm) return null;
