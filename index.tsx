@@ -2,27 +2,26 @@
  * BetterMarkdown — Renders GFM-style markdown tables inline in Discord messages.
  *
  * Architecture (two interception points):
- * 1. Flux event interception — Listens for MESSAGE_CREATE, MESSAGE_UPDATE,
- *    LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT, and CONNECTION_OPEN to install a
- *    reactive getter for customRenderedContent on messages with table syntax.
- * 2. Parser.parse wrapper — Intercepts all calls to Discord's markdown parser
- *    so tables also render in MessageLogger edit history and any other context
- *    that calls Parser.parse directly.
+ * 1. Flux event interception — Installs a reactive getter for
+ *    customRenderedContent on messages with table syntax.
+ * 2. Parser.parse wrapper — Wraps Discord's markdown parser so tables
+ *    render in MessageLogger edit history and any other context.
  *
- * Parsing strategy:
- * - Single-pass content block parser (parseContentBlocks) splits a message into
- *   alternating text and table blocks by scanning lines.
- * - Table rows are detected via regex that captures the clean pipe structure
- *   (groups 1/2/3: leading text, pipe structure, trailing text).
- * - Inline code awareness: pipes inside backtick-delimited spans are excluded
- *   from table detection via code-stripped regex testing.
- * - Salvage fallback: when column counts don't match across a table run, the
- *   salvage path re-slices the lines and tries to parse header lines as a
- *   body-only table, then separator+body as another body-only table.
- * - Column consistency is enforced: mismatched rows produce separate tables.
+ * Parsing strategy (two-pass lexer + parser):
+ * - tokenize() — Single pass through content with a stack for nested state
+ *   (code blocks). Produces line-level tokens: code_block_fence, table_row
+ *   (with pre-extracted cells + leading/trailing text), or text.
+ * - tryParseTableRow() — Backtick delimiter-pair matching (stack semantics)
+ *   extracts cells from the original line preserving inline code content.
+ * - parse() — Walks tokens, assembles ContentBlocks. Table rows group by
+ *   column count match — no salvage fallback, no re-slicing.
+ * - buildTables() — Column-aware table builder, splits on count mismatch.
+ * - isSeparatorCells() — Stateless check on pre-extracted cell arrays.
  *
- * TODO (future): Replace salvage fallback with a two-pass lexer + parser
- * architecture (tokenize once, parse blocks once — no re-slicing).
+ * Benefits over the previous approach:
+ * - One backtick-tracking implementation (vs 3 before)
+ * - No salvage fallback (column mismatch is a natural table boundary)
+ * - ContentBlock includes code_block variant for future extensibility
  */
 
 import definePlugin from "@utils/types";
@@ -37,221 +36,330 @@ const SelectedChannelStore = findByPropsLazy("getChannelId");
 
 type ContentBlock =
     | { type: "text"; text: string }
-    | { type: "table"; header: string[]; body: string[][] };
+    | { type: "table"; header: string[]; body: string[][] }
+    | { type: "code_block"; content: string; fence: string };
 
-// TABLE_ROW_RE captures three groups from a line containing a pipe-delimited structure:
-//   [1] Leading text before the first | (may be empty)
-//   [2] The clean pipe-delimited structure — from the first | to the last |  
-//   [3] Trailing text after the last | (pagination markers, comments, etc.)
-//
-// Example: "some text | a | b | c | (1/2)"
-//   [1] = "some text "
-//   [2] = "| a | b | c |"
-//   [3] = " (1/2)"
-const TABLE_ROW_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
+type LineToken =
+    | { kind: "code_block_fence"; fence: string }
+    | { kind: "table_row"; cells: string[]; leading: string; trailing: string }
+    | { kind: "text"; content: string };
 
-function isTableRow(l: string): boolean {
-    const t = l.trim();
-    if (!TABLE_ROW_RE.test(t)) return false;
-    // Strip all inline code (paired backtick groups like ``, ``, `````) before
-    // testing the regex. This prevents false positives where all visible pipes
-    // are inside backtick-delimited code spans (e.g., `` `| code |` ``).
-    return TABLE_ROW_RE.test(t.replace(/(`+)[\s\S]*?\1/g, ""));
-}
-function isSeparator(l: string): boolean {
-    const cells = splitCells(l);
+function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
 }
-function splitCells(l: string): string[] {
-    const raw = l.trim();
-    // Guard: strip inline code to check that pipes are real table boundaries,
-    // not just characters inside code spans (e.g., `` `| code |` ``).
-    const clean = raw.replace(/(`+)[\s\S]*?\1/g, "");
-    if (!TABLE_ROW_RE.test(clean)) return [];
 
-    // Extract cells from the ORIGINAL line (not stripped) so inline code
-    // content like `` `Code` `` and `` `` `inline code` `` `` is preserved.
-    // Walk with backtick delimiter-pair matching (codeDelim) — same logic as
-    // the leading-text extraction in parseContentBlocks.
-    const cells: string[] = [];
+// ---------------------------------------------------------------------------
+// Lexer: single-pass tokenizer with stack-based code-awareness.
+// Produces LineToken[] — each table_row token already has cells extracted.
+// ---------------------------------------------------------------------------
+
+function tokenize(content: string): LineToken[] {
+    const lines = content.split("\n");
+    const tokens: LineToken[] = [];
+    const state: string[] = []; // stack: "code_block"
+
+    for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        const currentState = state[state.length - 1] ?? null;
+
+        // Code block fences toggle state on ```
+        if (trimmed.startsWith("```")) {
+            if (currentState === "code_block") {
+                state.pop();
+            } else {
+                state.push("code_block");
+            }
+            tokens.push({ kind: "code_block_fence", fence: trimmed });
+            continue;
+        }
+
+        // Inside a code block — everything is literal text
+        if (currentState === "code_block") {
+            tokens.push({ kind: "text", content: rawLine });
+            continue;
+        }
+
+        // Outside code — try to parse as a table row
+        const row = tryParseTableRow(rawLine);
+        tokens.push(row ?? { kind: "text", content: rawLine });
+    }
+
+    return tokens;
+}
+
+// Character-by-character table row parser with backtick delimiter-pair
+// matching (stack semantics). Three phases:
+//   1. leading — text before the first unquoted pipe
+//   2. cells   — content between pipes (IS cell content)
+//   3. trailing — text after the last unquoted pipe
+function tryParseTableRow(raw: string): LineToken | null {
+    const line = raw.trim();
+
+    let leading = "";
+    let cells: string[] = [];
     let cell = "";
-    let inCode = false;
-    let codeDelim = 0;
-    let foundFirstPipe = false;
+    let trailing = "";
+    let phase: "leading" | "cells" | "trailing" = "leading";
 
-    for (let i = 0; i < raw.length; i++) {
-        const ch = raw[i];
+    // Stack-based inline code tracking:
+    //   null  → not inside inline code
+    //   number → inside code, opened by N consecutive backticks
+    let codeDelim: number | null = null;
+    let i = 0;
+
+    while (i < line.length) {
+        const ch = line[i];
+
+        // Backtick grouping — treat consecutive backticks as a unit
         if (ch === "`") {
             let count = 1;
-            while (i + count < raw.length && raw[i + count] === "`") count++;
-            if (!inCode) {
-                inCode = true;
-                codeDelim = count;
+            while (i + count < line.length && line[i + count] === "`") count++;
+
+            if (codeDelim === null) {
+                codeDelim = count;       // entering inline code
             } else if (count === codeDelim) {
-                inCode = false;
-                codeDelim = 0;
+                codeDelim = null;        // exiting inline code
             }
-            if (foundFirstPipe) {
-                for (let k = 0; k < count; k++) cell += raw[i + k];
-            }
-            i += count - 1;
-        } else if (ch === "|" && !inCode) {
-            if (!foundFirstPipe) {
-                foundFirstPipe = true;
-            } else {
+            // Different-length group inside code = content, not delimiter
+
+            const chunk = line.slice(i, i + count);
+            if (phase === "leading") leading += chunk;
+            else if (phase === "cells") cell += chunk;
+            else trailing += chunk;
+
+            i += count;
+            continue;
+        }
+
+        // Pipe outside of inline code → phase transition
+        if (ch === "|" && codeDelim === null) {
+            if (phase === "leading") {
+                leading = leading.trimEnd();
+                phase = "cells";
+            } else if (phase === "cells") {
                 cells.push(cell.trim());
                 cell = "";
             }
-        } else if (foundFirstPipe) {
-            cell += ch;
-        }
-    }
-    return cells;
-}
-function hasTableSyntax(c: string): boolean {
-    const lines = c.split("\n"); let inCode = false;
-    for (const l of lines) {
-        if (l.trim().startsWith("```")) { inCode = !inCode; continue; }
-        if (inCode) continue;
-        if (isTableRow(l)) return true;
-    }
-    return false;
-}
-function parseContentBlocks(c: string): ContentBlock[] {
-    const lines = c.split("\n"); const blocks: ContentBlock[] = []; let i = 0;
-    while (i < lines.length) {
-        // Code blocks: collect everything until closing ``` as one text block
-        if (lines[i].trim().startsWith("```")) {
-            const codeLines: string[] = [lines[i]];
+            // In trailing phase, a stray | is just literal text
+            else {
+                trailing += ch;
+            }
             i++;
-            while (i < lines.length && !lines[i].trim().startsWith("```")) { codeLines.push(lines[i]); i++; }
-            if (i < lines.length) { codeLines.push(lines[i]); i++; }
-            blocks.push({ type: "text", text: codeLines.join("\n") });
             continue;
         }
-        if (isTableRow(lines[i])) {
-            const tl: string[] = [];
-            const leading: string[] = [];
-            const trailing: string[] = [];
-            while (i < lines.length && isTableRow(lines[i])) {
-                const raw = lines[i].trim();
-                // Extract leading text from the ORIGINAL line (before code stripping)
-                // by walking characters with backtick delimiter-pair matching.
-                // This preserves inline code content like `` ``| code |`` `` in leading
-                // text, while still recognizing pipes outside of code as the boundary.
-                // We only capture leading text from the first row of a table block —
-                // subsequent rows within the same table don't have independent leading text.
-                let lead = "";
-                if (tl.length === 0) {
-                    let inCode = false;
-                    let codeDelim = 0;
-                    for (let j = 0; j < raw.length; j++) {
-                        const ch = raw[j];
-                        if (ch === "`") {
-                            let count = 1;
-                            while (j + count < raw.length && raw[j + count] === "`") count++;
-                            if (!inCode) {
-                                inCode = true;
-                                codeDelim = count;
-                            } else if (count === codeDelim) {
-                                inCode = false;
-                                codeDelim = 0;
-                            }
-                            for (let k = 0; k < count; k++) lead += "`";
-                            j += count - 1;
-                        } else if (ch === "|" && !inCode) {
-                            lead = lead.trimEnd();
-                            break;
-                        } else {
-                            lead += ch;
-                        }
-                    }
-                }
-                if (lead.trim()) leading.push(lead.trim());
-                tl.push(raw);
-                // Trailing text via regex on code-stripped line
-                const clean = raw.replace(/(`+)[\s\S]*?\1/g, "");
-                const m = clean.match(TABLE_ROW_RE);
-                if (m?.[3]?.trim()) trailing.push(m[3].trim());
+
+        // Regular character — route to current phase
+        if (phase === "leading") leading += ch;
+        else if (phase === "cells") cell += ch;
+        else trailing += ch;
+        i++;
+    }
+
+    // Never entered the cells phase → not a table row
+    if (phase === "leading") return null;
+
+    // --- Post-processing: use code-stripped line to determine the real ---
+    // --- cell/trailing boundary. The character walk above preserves inline ---
+    // --- code values but can't distinguish the Nth cell from trailing text. ---
+    const clean = line.replace(/(`+)[\s\S]*?\1/g, "");
+    const STRUCT_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
+    const sm = clean.match(STRUCT_RE);
+    if (!sm) return null;
+
+    // Number of data cells = pipes in group 2 minus the leading pipe
+    // "| a | b |" → 3 pipes → 2 cells
+    const pipeCount = (sm[2].match(/\|/g) || []).length;
+    const structCellCount = Math.max(1, pipeCount - 1);
+    const trailingClean = sm[3]?.trim() || "";
+
+    // If we extracted more cells than the structure allows, the extras
+    // are actually trailing text. Move them from cells → trailing.
+    while (cells.length > structCellCount) {
+        const extra = cells.pop()!;
+        trailing = extra + (trailing ? " " + trailing : "");
+    }
+
+    // If the structure shows trailing text but we extracted it as a cell
+    // buffer, move it to trailing.
+    if (trailingClean && !trailing && cell.trim()) {
+        trailing = cell.trim();
+        cell = "";
+    }
+
+    // Push the final cell only if there's actual content.
+    // Don't push an empty string just because cells.length > 0.
+    if (cell.trim()) cells.push(cell.trim());
+
+    // Need at least 2 cells (single pipe produces 2 cells minimum)
+    if (cells.length < 2) return null;
+
+    // If every cell is empty the line had no real table content
+    if (cells.every(c => c === "")) return null;
+
+    return {
+        kind: "table_row",
+        cells,
+        leading: leading.trim(),
+        trailing: trailing.trim(),
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Parser: walks tokens → ContentBlock[].
+// Table rows group by column count match — no salvage fallback, no re-slicing.
+// ---------------------------------------------------------------------------
+
+function parse(tokens: LineToken[]): ContentBlock[] {
+    const blocks: ContentBlock[] = [];
+    let i = 0;
+
+    while (i < tokens.length) {
+        const t = tokens[i];
+
+        if (t.kind === "code_block_fence") {
+            // Collect entire code block: opening fence + content + closing fence
+            const fence = t.fence;
+            const codeLines: string[] = [t.fence];
+            i++;
+            while (i < tokens.length && tokens[i].kind !== "code_block_fence") {
+                codeLines.push(tokens[i].kind === "text" ? tokens[i].content : "");
                 i++;
             }
-            const p = parseSingleTable(tl);
-            if (p) {
-                if (leading.length > 0)
-                    blocks.push({ type: "text", text: leading.join(" ") });
-                blocks.push({ type: "table", header: p.header, body: p.body });
-                if (trailing.length > 0)
-                    blocks.push({ type: "text", text: trailing.join(" ") });
-            } else {
-                // Salvage: parseSingleTable returned null — column counts don't match.
-                // This happens when consecutive table-like lines have different column counts
-                // (e.g., a 2-cell header above a 4-cell body). Try to recover by:
-                //   1. Pushing any accumulated leading text
-                //   2. Parsing header lines before the separator as a body-only table
-                //   3. Parsing separator+body as another body-only table
-                //
-                // Example: "| a | real | table |"  (2 cells)
-                //          "|---|---|---|---|"      (4-cell sep — mismatch!)
-                //          "| works | fine | ✅ | test |" (4 cells)
-                // Produces: 2-column body table + 4-column body table
-                const salSep = tl.findIndex(l => isSeparator(l));
-                if (salSep >= 0) {
-                    if (leading.length > 0)
-                        blocks.push({ type: "text", text: leading.join(" ") });
-                    if (salSep > 0) {
-                        const hp = parseSingleTable(tl.slice(0, salSep));
-                        if (hp) blocks.push({ type: "table", header: hp.header, body: hp.body });
-                        else blocks.push({ type: "text", text: tl.slice(0, salSep).join("\n") });
-                    }
-                    const bp = parseSingleTable(tl.slice(salSep));
-                    if (bp) {
-                        blocks.push({ type: "table", header: bp.header, body: bp.body });
-                        if (trailing.length > 0)
-                            blocks.push({ type: "text", text: trailing.join(" ") });
-                        continue;
-                    }
-                }
-                blocks.push({ type: "text", text: tl.join("\n") });
+            if (i < tokens.length) {
+                codeLines.push(tokens[i].fence);
+                i++;
             }
-        } else {
-            const tl: string[] = [];
-            while (i < lines.length && !isTableRow(lines[i]) && !lines[i].trim().startsWith("```")) { tl.push(lines[i]); i++; }
-            const t = tl.join("\n").trim();
-            if (t) blocks.push({ type: "text", text: t });
+            blocks.push({ type: "code_block", content: codeLines.join("\n"), fence });
+            continue;
         }
+
+        if (t.kind === "table_row") {
+            // Collect consecutive table-row tokens
+            const rows: { kind: "table_row"; cells: string[]; leading: string; trailing: string }[] = [];
+            const leadingText: string[] = [];
+            const trailingText: string[] = [];
+
+            while (i < tokens.length && tokens[i].kind === "table_row") {
+                const tr = tokens[i] as Extract<LineToken, { kind: "table_row" }>;
+                rows.push(tr);
+                if (tr.leading) leadingText.push(tr.leading);
+                if (tr.trailing) trailingText.push(tr.trailing);
+                i++;
+            }
+
+            // Emit leading text from the first row (existing behavior)
+            if (leadingText.length > 0)
+                blocks.push({ type: "text", text: leadingText[0] });
+
+            // Build table(s) — split on column count mismatches
+            buildTables(rows, blocks);
+
+            // Emit trailing text
+            if (trailingText.length > 0)
+                blocks.push({ type: "text", text: trailingText.join(" ") });
+
+            continue;
+        }
+
+        // Plain text — accumulate until next non-text token
+        const textLines: string[] = [];
+        while (i < tokens.length && tokens[i].kind === "text") {
+            textLines.push(tokens[i].content);
+            i++;
+        }
+        const joined = textLines.join("\n").trim();
+        if (joined) blocks.push({ type: "text", text: joined });
     }
+
     return blocks;
 }
-function parseSingleTable(lines: string[]): { header: string[]; body: string[][] } | null {
-    if (lines.length < 1) return null;
-    const sepIdx = lines.findIndex(l => isSeparator(l));
 
-    if (sepIdx >= 0) {
-        if (sepIdx === 0) {
-            // Case 1: Separator-first (no header row). All subsequent lines are body.
-            // Example: "|---|---|---|\n| a | b | c |"
-            const b = lines.slice(1).map(l => splitCells(l));
-            if (b.length === 0) return null;
-            const cellCount = b[0].length;
-            if (cellCount < 2 || b.some(r => r.length !== cellCount)) return null;
-            return { header: [], body: b };
+// Column-aware table builder. Groups consecutive rows into tables,
+// splitting when column counts differ. Handles all three GFM cases:
+//   1. separator-first → body-only table
+//   2. header + separator + body → full table
+//   3. no separator → body-only table
+function buildTables(
+    rows: { cells: string[]; leading: string; trailing: string }[],
+    blocks: ContentBlock[]
+): void {
+    let start = 0;
+
+    while (start < rows.length) {
+        const sepIdx = rows.slice(start).findIndex(r => isSeparatorCells(r.cells));
+        const absSep = sepIdx >= 0 ? start + sepIdx : -1;
+
+        if (absSep >= 0 && absSep > start) {
+            // Case 2: header + separator + body
+            const header = rows[start].cells;
+            const bodyRows = rows.slice(absSep + 1);
+
+            // Column consistency: body must match header width
+            const bodyOk = bodyRows.length === 0 ||
+                bodyRows.every(r => r.cells.length === header.length);
+
+            if (bodyOk && header.length >= 1) {
+                blocks.push({
+                    type: "table",
+                    header,
+                    body: bodyRows.map(r => r.cells),
+                });
+                start = absSep + 1 + bodyRows.length;
+                continue;
+            }
+            // Mismatch → fall through to body-only interpretation
         }
-        // Case 2: Full table with header + separator + body.
-        // Example: "| A | B |\n|---|---|\n| 1 | 2 |"
-        const h = splitCells(lines[0]);
-        const b = lines.slice(sepIdx + 1).map(l => splitCells(l));
-        if (h.length < 1) return null;
-        if (b.length > 0 && b.some(r => r.length !== h.length)) return null;
-        return { header: h, body: b };
-    }
 
-    // Case 3: No separator — all rows are body (partial table / continuation).
-    // Example: "| 1 | 2 |\n| 3 | 4 |"
-    const cellCount = splitCells(lines[0]).length;
-    if (cellCount < 2) return null;
-    const b = lines.map(l => splitCells(l));
-    if (b.some(r => r.length !== cellCount)) return null;
-    return { header: [], body: b };
+        if (absSep === start) {
+            // Case 1: separator-first — body-only table
+            const bodyRows = rows.slice(absSep + 1);
+            if (bodyRows.length === 0) { start++; continue; }
+
+            const cellCount = bodyRows[0].cells.length;
+            let end = start + 1;
+            while (end < rows.length &&
+                   rows[end].cells.length === cellCount &&
+                   !isSeparatorCells(rows[end].cells)) end++;
+
+            if (cellCount >= 2) {
+                blocks.push({
+                    type: "table",
+                    header: [],
+                    body: bodyRows.slice(0, end - (start + 1)).map(r => r.cells),
+                });
+            }
+            start = end;
+            continue;
+        }
+
+        // Case 3: no separator — body-only table
+        const cellCount = rows[start].cells.length;
+        if (cellCount < 2) {
+            // Single cell row → treat as regular text
+            blocks.push({ type: "text", text: rows[start].cells.map(c => `| ${c} |`).join(" ") });
+            start++;
+            continue;
+        }
+
+        let end = start + 1;
+        while (end < rows.length &&
+               rows[end].cells.length === cellCount &&
+               !isSeparatorCells(rows[end].cells)) end++;
+
+        blocks.push({
+            type: "table",
+            header: [],
+            body: rows.slice(start, end).map(r => r.cells),
+        });
+        start = end;
+    }
+}
+function hasTableSyntax(c: string): boolean {
+    return tokenize(c).some(t => t.kind === "table_row");
+}
+
+function parseContentBlocks(c: string): ContentBlock[] {
+    return parse(tokenize(c));
 }
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
     const inlineOpts = { allowLinks: true, allowList: true };
@@ -272,8 +380,12 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
         if (b.type === "text") {
             ch.push(React.createElement(React.Fragment, { key: ch.length },
                 Parser.parse(b.text, false, textOpts)));
-        } else {
+        } else if (b.type === "table") {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+        } else {
+            // code_block — pass through to Discord's parser as-is
+            ch.push(React.createElement(React.Fragment, { key: ch.length },
+                Parser.parse(b.content, false, textOpts)));
         }
     }
     return React.createElement(React.Fragment, null, ...ch);
@@ -397,8 +509,12 @@ export default definePlugin({
                 if (b.type === "text") {
                     ch.push(React.createElement(React.Fragment, { key: ch.length },
                         _origParse!.call(this, b.text, inline, opts)));
-                } else {
+                } else if (b.type === "table") {
                     ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+                } else {
+                    // code_block — pass through to Discord's parser
+                    ch.push(React.createElement(React.Fragment, { key: ch.length },
+                        _origParse!.call(this, b.content, inline, opts)));
                 }
             }
             return React.createElement(React.Fragment, null, ...ch);
