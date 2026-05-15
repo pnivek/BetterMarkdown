@@ -61,18 +61,16 @@ function splitCells(l: string): string[] {
             cell += ch;
         }
     }
-    const last = cell.trim();
-    if (last) cells.push(last);
     return cells;
 }
 function hasTableSyntax(c: string): boolean {
-    const lines = c.split("\n"); let rc = 0; let inCode = false;
+    const lines = c.split("\n"); let inCode = false;
     for (const l of lines) {
         if (l.trim().startsWith("```")) { inCode = !inCode; continue; }
         if (inCode) continue;
-        if (isTableRow(l)) rc++;
+        if (isTableRow(l)) return true;
     }
-    return rc > 0; // Any pipe row counts as a table (including partial/single-row tables)
+    return false;
 }
 function parseContentBlocks(c: string): ContentBlock[] {
     const lines = c.split("\n"); const blocks: ContentBlock[] = []; let i = 0;
@@ -106,8 +104,9 @@ function parseContentBlocks(c: string): ContentBlock[] {
                 blocks.push({ type: "table", header: p.header, body: p.body });
                 if (trailing.length > 0)
                     blocks.push({ type: "text", text: trailing.join(" ") });
+            } else {
+                blocks.push({ type: "text", text: tl.join("\n") });
             }
-            else blocks.push({ type: "text", text: tl.join("\n") });
         } else {
             const tl: string[] = [];
             while (i < lines.length && !isTableRow(lines[i]) && !lines[i].trim().startsWith("```")) { tl.push(lines[i]); i++; }
@@ -119,12 +118,12 @@ function parseContentBlocks(c: string): ContentBlock[] {
 }
 function parseSingleTable(lines: string[]): { header: string[]; body: string[][] } | null {
     if (lines.length < 1) return null;
-    const si = lines.findIndex(l => isSeparator(l));
+    const sepIdx = lines.findIndex(l => isSeparator(l));
 
-    if (si >= 0) {
+    if (sepIdx >= 0) {
         // Full table: header + separator + body
         const h = splitCells(lines[0]);
-        const b = lines.slice(si + 1).map(l => splitCells(l));
+        const b = lines.slice(sepIdx + 1).map(l => splitCells(l));
         if (h.length < 1) return null;
         if (b.length > 0 && b.some(r => r.length !== h.length)) return null;
         return { header: h, body: b };
@@ -245,7 +244,7 @@ export default definePlugin({
     authors: [{ name: "pnivek", id: 400665810353389568n }],
     tags: ["Chat", "Utility"],
 
-    _unsubs: [] as any[],
+    _unsubs: [] as (() => void)[],
 
     start() {
         logger.log("start()");
