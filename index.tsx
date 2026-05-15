@@ -94,12 +94,19 @@ function parseContentBlocks(c: string): ContentBlock[] {
                 let lead = "";
                 if (tl.length === 0) {
                     let inCode = false;
+                    let codeDelim = 0;
                     for (let j = 0; j < raw.length; j++) {
                         const ch = raw[j];
                         if (ch === "`") {
                             let count = 1;
                             while (j + count < raw.length && raw[j + count] === "`") count++;
-                            inCode = !inCode;
+                            if (!inCode) {
+                                inCode = true;
+                                codeDelim = count;
+                            } else if (count === codeDelim) {
+                                inCode = false;
+                                codeDelim = 0;
+                            }
                             for (let k = 0; k < count; k++) lead += "`";
                             j += count - 1;
                         } else if (ch === "|" && !inCode) {
