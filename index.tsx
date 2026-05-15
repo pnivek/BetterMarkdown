@@ -9,19 +9,22 @@
  *
  * Parsing strategy (two-pass lexer + parser):
  * - tokenize() — Single pass through content with a stack for nested state
- *   (code blocks). Produces line-level tokens: code_block_fence, table_row
- *   (with pre-extracted cells + leading/trailing text), or text.
+ *   (code blocks). Produces line-level tokens: code_block_fence, table_row,
+ *   task_list_item, or text.
  * - tryParseTableRow() — Backtick delimiter-pair matching (stack semantics)
  *   extracts cells from the original line preserving inline code content.
+ * - tryParseTaskListItem() — Detects GFM task list syntax `- [ ]` / `- [x]`
+ *   with code-aware matching to avoid false positives inside inline code.
  * - parse() — Walks tokens, assembles ContentBlocks. Table rows group by
- *   column count match — no salvage fallback, no re-slicing.
+ *   column count match; task items group into task_list blocks.
+ *   No salvage fallback, no re-slicing.
  * - buildTables() — Column-aware table builder, splits on count mismatch.
  * - isSeparatorCells() — Stateless check on pre-extracted cell arrays.
  *
  * Benefits over the previous approach:
  * - One backtick-tracking implementation (vs 3 before)
  * - No salvage fallback (column mismatch is a natural table boundary)
- * - ContentBlock includes code_block variant for future extensibility
+ * - ContentBlock includes code_block and task_list variants for extensibility
  */
 
 import definePlugin from "@utils/types";
@@ -297,6 +300,20 @@ function parse(tokens: LineToken[]): ContentBlock[] {
             continue;
         }
 
+        if (t.kind === "task_list_item") {
+            // Collect consecutive task items into a single task_list block
+            const items: { checked: boolean; text: string }[] = [];
+
+            while (i < tokens.length && tokens[i].kind === "task_list_item") {
+                const ti = tokens[i] as Extract<LineToken, { kind: "task_list_item" }>;
+                items.push({ checked: ti.checked, text: ti.text });
+                i++;
+            }
+
+            blocks.push({ type: "task_list", items });
+            continue;
+        }
+
         // Plain text — accumulate until next non-text token
         const textLines: string[] = [];
         while (i < tokens.length && tokens[i].kind === "text") {
@@ -391,7 +408,7 @@ function buildTables(
     }
 }
 function hasTableSyntax(c: string): boolean {
-    return tokenize(c).some(t => t.kind === "table_row");
+    return tokenize(c).some(t => t.kind === "table_row" || t.kind === "task_list_item");
 }
 
 function parseContentBlocks(c: string): ContentBlock[] {
@@ -404,6 +421,19 @@ function TableComponent({ header, body }: { header: string[]; body: string[][] }
             {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
             {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
         </table></div>);
+}
+function TaskListComponent({ items }: { items: { checked: boolean; text: string }[] }) {
+    const inlineOpts = { allowLinks: true, allowList: true };
+    return (<div style={{ marginTop: 4, marginBottom: 4, background: "var(--background-secondary)", borderRadius: 4, padding: "4px 0", color: "var(--text-normal)", fontFamily: "var(--font-primary)", fontSize: 13 }}>
+        {items.map((item, i) => (<div key={i} style={{ display: "flex", alignItems: "center", padding: "4px 12px", gap: 8 }}>
+            <span style={{ flexShrink: 0, width: 18, height: 18, borderRadius: 3, border: item.checked ? "none" : "2px solid var(--text-muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", background: item.checked ? "var(--green-360)" : "transparent" }}>
+                {item.checked ? "✓" : ""}
+            </span>
+            <span style={{ textDecoration: item.checked ? "line-through" : "none", opacity: item.checked ? 0.6 : 1, color: "var(--text-normal)" }}>
+                {Parser.parse(item.text, true, inlineOpts) ?? item.text}
+            </span>
+        </div>))}
+    </div>);
 }
 function renderContent(blocks: ContentBlock[]): React.ReactNode {
     const textOpts = { allowHeading: true, allowLinks: true, allowList: true, allowEmojiLinks: true };
@@ -418,6 +448,8 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
                 Parser.parse(b.text, false, textOpts)));
         } else if (b.type === "table") {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+        } else if (b.type === "task_list") {
+            ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
         } else {
             // code_block — pass through to Discord's parser as-is
             ch.push(React.createElement(React.Fragment, { key: ch.length },
@@ -547,6 +579,8 @@ export default definePlugin({
                         _origParse!.call(this, b.text, inline, opts)));
                 } else if (b.type === "table") {
                     ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+                } else if (b.type === "task_list") {
+                    ch.push(React.createElement(TaskListComponent, { key: ch.length, items: b.items }));
                 } else {
                     // code_block — pass through to Discord's parser
                     ch.push(React.createElement(React.Fragment, { key: ch.length },
