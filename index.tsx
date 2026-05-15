@@ -40,6 +40,15 @@ type ContentBlock =
     | { type: "table"; header: string[]; body: string[][] }
     | { type: "code_block"; content: string; fence: string };
 
+type LineToken =
+    | { kind: "code_block_fence"; fence: string }
+    | { kind: "table_row"; cells: string[]; leading: string; trailing: string }
+    | { kind: "text"; content: string };
+
+function isSeparatorCells(cells: string[]): boolean {
+    return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
+}
+
 // TABLE_ROW_RE captures three groups from a line containing a pipe-delimited structure:
 //   [1] Leading text before the first | (may be empty)
 //   [2] The clean pipe-delimited structure — from the first | to the last |  
