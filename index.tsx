@@ -326,112 +326,12 @@ function buildTables(
         start = end;
     }
 }
-// TABLE_ROW_RE captures three groups from a line containing a pipe-delimited structure:
-//   [1] Leading text before the first | (may be empty)
-//   [2] The clean pipe-delimited structure — from the first | to the last |  
-//   [3] Trailing text after the last | (pagination markers, comments, etc.)
-//
-// Example: "some text | a | b | c | (1/2)"
-//   [1] = "some text "
-//   [2] = "| a | b | c |"
-//   [3] = " (1/2)"
-const TABLE_ROW_RE = /^(.*?)(\|(?:[^|]+\|)+)(.*)$/;
-
-function isTableRow(l: string): boolean {
-    const t = l.trim();
-    if (!TABLE_ROW_RE.test(t)) return false;
-    // Strip all inline code (paired backtick groups like ``, ``, `````) before
-    // testing the regex. This prevents false positives where all visible pipes
-    // are inside backtick-delimited code spans (e.g., `` `| code |` ``).
-    return TABLE_ROW_RE.test(t.replace(/(`+)[\s\S]*?\1/g, ""));
-}
-function isSeparator(l: string): boolean {
-    const cells = splitCells(l);
-    return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
-}
-function splitCells(l: string): string[] {
-    const raw = l.trim();
-    // Guard: strip inline code to check that pipes are real table boundaries,
-    // not just characters inside code spans (e.g., `` `| code |` ``).
-    const clean = raw.replace(/(`+)[\s\S]*?\1/g, "");
-    if (!TABLE_ROW_RE.test(clean)) return [];
-
-    // Extract cells from the ORIGINAL line (not stripped) so inline code
-    // content like `` `Code` `` and `` `` `inline code` `` `` is preserved.
-    // Walk with backtick delimiter-pair matching (codeDelim) — same logic as
-    // the leading-text extraction in parseContentBlocks.
-    const cells: string[] = [];
-    let cell = "";
-    let inCode = false;
-    let codeDelim = 0;
-    let foundFirstPipe = false;
-
-    for (let i = 0; i < raw.length; i++) {
-        const ch = raw[i];
-        if (ch === "`") {
-            let count = 1;
-            while (i + count < raw.length && raw[i + count] === "`") count++;
-            if (!inCode) {
-                inCode = true;
-                codeDelim = count;
-            } else if (count === codeDelim) {
-                inCode = false;
-                codeDelim = 0;
-            }
-            if (foundFirstPipe) {
-                for (let k = 0; k < count; k++) cell += raw[i + k];
-            }
-            i += count - 1;
-        } else if (ch === "|" && !inCode) {
-            if (!foundFirstPipe) {
-                foundFirstPipe = true;
-            } else {
-                cells.push(cell.trim());
-                cell = "";
-            }
-        } else if (foundFirstPipe) {
-            cell += ch;
-        }
-    }
-    return cells;
-}
 function hasTableSyntax(c: string): boolean {
     return tokenize(c).some(t => t.kind === "table_row");
 }
 
 function parseContentBlocks(c: string): ContentBlock[] {
     return parse(tokenize(c));
-}
-function parseSingleTable(lines: string[]): { header: string[]; body: string[][] } | null {
-    if (lines.length < 1) return null;
-    const sepIdx = lines.findIndex(l => isSeparator(l));
-
-    if (sepIdx >= 0) {
-        if (sepIdx === 0) {
-            // Case 1: Separator-first (no header row). All subsequent lines are body.
-            // Example: "|---|---|---|\n| a | b | c |"
-            const b = lines.slice(1).map(l => splitCells(l));
-            if (b.length === 0) return null;
-            const cellCount = b[0].length;
-            if (cellCount < 2 || b.some(r => r.length !== cellCount)) return null;
-            return { header: [], body: b };
-        }
-        // Case 2: Full table with header + separator + body.
-        // Example: "| A | B |\n|---|---|\n| 1 | 2 |"
-        const h = splitCells(lines[0]);
-        const b = lines.slice(sepIdx + 1).map(l => splitCells(l));
-        if (h.length < 1) return null;
-        if (b.length > 0 && b.some(r => r.length !== h.length)) return null;
-        return { header: h, body: b };
-    }
-
-    // Case 3: No separator — all rows are body (partial table / continuation).
-    // Example: "| 1 | 2 |\n| 3 | 4 |"
-    const cellCount = splitCells(lines[0]).length;
-    if (cellCount < 2) return null;
-    const b = lines.map(l => splitCells(l));
-    if (b.some(r => r.length !== cellCount)) return null;
-    return { header: [], body: b };
 }
 function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
     const inlineOpts = { allowLinks: true, allowList: true };
