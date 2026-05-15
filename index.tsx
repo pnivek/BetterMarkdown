@@ -176,6 +176,156 @@ function tryParseTableRow(raw: string): LineToken | null {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Parser: walks tokens → ContentBlock[].
+// Table rows group by column count match — no salvage fallback, no re-slicing.
+// ---------------------------------------------------------------------------
+
+function parse(tokens: LineToken[]): ContentBlock[] {
+    const blocks: ContentBlock[] = [];
+    let i = 0;
+
+    while (i < tokens.length) {
+        const t = tokens[i];
+
+        if (t.kind === "code_block_fence") {
+            // Collect entire code block: opening fence + content + closing fence
+            const fence = t.fence;
+            const codeLines: string[] = [t.fence];
+            i++;
+            while (i < tokens.length && tokens[i].kind !== "code_block_fence") {
+                codeLines.push(tokens[i].kind === "text" ? tokens[i].content : "");
+                i++;
+            }
+            if (i < tokens.length) {
+                codeLines.push(tokens[i].fence);
+                i++;
+            }
+            blocks.push({ type: "code_block", content: codeLines.join("\n"), fence });
+            continue;
+        }
+
+        if (t.kind === "table_row") {
+            // Collect consecutive table-row tokens
+            const rows: { kind: "table_row"; cells: string[]; leading: string; trailing: string }[] = [];
+            const leadingText: string[] = [];
+            const trailingText: string[] = [];
+
+            while (i < tokens.length && tokens[i].kind === "table_row") {
+                const tr = tokens[i] as Extract<LineToken, { kind: "table_row" }>;
+                rows.push(tr);
+                if (tr.leading) leadingText.push(tr.leading);
+                if (tr.trailing) trailingText.push(tr.trailing);
+                i++;
+            }
+
+            // Emit leading text from the first row (existing behavior)
+            if (leadingText.length > 0)
+                blocks.push({ type: "text", text: leadingText[0] });
+
+            // Build table(s) — split on column count mismatches
+            buildTables(rows, blocks);
+
+            // Emit trailing text
+            if (trailingText.length > 0)
+                blocks.push({ type: "text", text: trailingText.join(" ") });
+
+            continue;
+        }
+
+        // Plain text — accumulate until next non-text token
+        const textLines: string[] = [];
+        while (i < tokens.length && tokens[i].kind === "text") {
+            textLines.push(tokens[i].content);
+            i++;
+        }
+        const joined = textLines.join("\n").trim();
+        if (joined) blocks.push({ type: "text", text: joined });
+    }
+
+    return blocks;
+}
+
+// Column-aware table builder. Groups consecutive rows into tables,
+// splitting when column counts differ. Handles all three GFM cases:
+//   1. separator-first → body-only table
+//   2. header + separator + body → full table
+//   3. no separator → body-only table
+function buildTables(
+    rows: { cells: string[]; leading: string; trailing: string }[],
+    blocks: ContentBlock[]
+): void {
+    let start = 0;
+
+    while (start < rows.length) {
+        const sepIdx = rows.slice(start).findIndex(r => isSeparatorCells(r.cells));
+        const absSep = sepIdx >= 0 ? start + sepIdx : -1;
+
+        if (absSep >= 0 && absSep > start) {
+            // Case 2: header + separator + body
+            const header = rows[start].cells;
+            const bodyRows = rows.slice(absSep + 1);
+
+            // Column consistency: body must match header width
+            const bodyOk = bodyRows.length === 0 ||
+                bodyRows.every(r => r.cells.length === header.length);
+
+            if (bodyOk && header.length >= 1) {
+                blocks.push({
+                    type: "table",
+                    header,
+                    body: bodyRows.map(r => r.cells),
+                });
+                start = absSep + 1 + bodyRows.length;
+                continue;
+            }
+            // Mismatch → fall through to body-only interpretation
+        }
+
+        if (absSep === start) {
+            // Case 1: separator-first — body-only table
+            const bodyRows = rows.slice(absSep + 1);
+            if (bodyRows.length === 0) { start++; continue; }
+
+            const cellCount = bodyRows[0].cells.length;
+            let end = start + 1;
+            while (end < rows.length &&
+                   rows[end].cells.length === cellCount &&
+                   !isSeparatorCells(rows[end].cells)) end++;
+
+            if (cellCount >= 2) {
+                blocks.push({
+                    type: "table",
+                    header: [],
+                    body: bodyRows.slice(0, end - (start + 1)).map(r => r.cells),
+                });
+            }
+            start = end;
+            continue;
+        }
+
+        // Case 3: no separator — body-only table
+        const cellCount = rows[start].cells.length;
+        if (cellCount < 2) {
+            // Single cell row → treat as regular text
+            blocks.push({ type: "text", text: rows[start].cells.map(c => `| ${c} |`).join(" ") });
+            start++;
+            continue;
+        }
+
+        let end = start + 1;
+        while (end < rows.length &&
+               rows[end].cells.length === cellCount &&
+               !isSeparatorCells(rows[end].cells)) end++;
+
+        blocks.push({
+            type: "table",
+            header: [],
+            body: rows.slice(start, end).map(r => r.cells),
+        });
+        start = end;
+    }
+}
 // TABLE_ROW_RE captures three groups from a line containing a pipe-delimited structure:
 //   [1] Leading text before the first | (may be empty)
 //   [2] The clean pipe-delimited structure — from the first | to the last |  
