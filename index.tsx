@@ -196,7 +196,7 @@ function tryParseTableRow(raw: string): LineToken | null {
 
         // Escaped pipe — \| outside code/quotes emits a literal | without
         // triggering a column break, so table cells can contain pipe characters.
-        if (ch === '\' && i + 1 < line.length && line[i + 1] === '|' && codeDelim === null && !inQuote) {
+        if (ch === '\\' && i + 1 < line.length && line[i + 1] === '|' && codeDelim === null && !inQuote) {
             if (phase === 'leading') leading += '|';
             else if (phase === 'cells') cell += '|';
             else trailing += '|';
