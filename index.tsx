@@ -89,7 +89,10 @@ function parseContentBlocks(c: string): ContentBlock[] {
             const trailing: string[] = [];
             while (i < lines.length && isTableRow(lines[i])) {
                 const raw = lines[i].trim();
-                const m = raw.match(TABLE_ROW_RE);
+                // Strip inline code for leading/trailing text extraction,
+                // so the first | inside backticks doesn't corrupt the regex match
+                const clean = raw.replace(/(`+)[\s\S]*?\1/g, "");
+                const m = clean.match(TABLE_ROW_RE);
                 if (tl.length === 0 && m?.[1]?.trim()) leading.push(m[1].trim());
                 tl.push(raw);
                 if (m?.[3]?.trim()) trailing.push(m[3].trim());
