@@ -89,12 +89,32 @@ function parseContentBlocks(c: string): ContentBlock[] {
             const trailing: string[] = [];
             while (i < lines.length && isTableRow(lines[i])) {
                 const raw = lines[i].trim();
-                // Strip inline code for leading/trailing text extraction,
-                // so the first | inside backticks doesn't corrupt the regex match
+                // Extract leading text from the ORIGINAL line by walking chars,
+                // tracking backtick state so inline code content is preserved
+                let lead = "";
+                if (tl.length === 0) {
+                    let inCode = false;
+                    for (let j = 0; j < raw.length; j++) {
+                        const ch = raw[j];
+                        if (ch === "`") {
+                            let count = 1;
+                            while (j + count < raw.length && raw[j + count] === "`") count++;
+                            inCode = !inCode;
+                            for (let k = 0; k < count; k++) lead += "`";
+                            j += count - 1;
+                        } else if (ch === "|" && !inCode) {
+                            lead = lead.trimEnd();
+                            break;
+                        } else {
+                            lead += ch;
+                        }
+                    }
+                }
+                if (lead.trim()) leading.push(lead.trim());
+                tl.push(raw);
+                // Trailing text via regex on code-stripped line
                 const clean = raw.replace(/(`+)[\s\S]*?\1/g, "");
                 const m = clean.match(TABLE_ROW_RE);
-                if (tl.length === 0 && m?.[1]?.trim()) leading.push(m[1].trim());
-                tl.push(raw);
                 if (m?.[3]?.trim()) trailing.push(m[3].trim());
                 i++;
             }
