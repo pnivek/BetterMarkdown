@@ -49,6 +49,133 @@ function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
 }
 
+// ---------------------------------------------------------------------------
+// Lexer: single-pass tokenizer with stack-based code-awareness.
+// Produces LineToken[] — each table_row token already has cells extracted.
+// ---------------------------------------------------------------------------
+
+function tokenize(content: string): LineToken[] {
+    const lines = content.split("\n");
+    const tokens: LineToken[] = [];
+    const state: string[] = []; // stack: "code_block"
+
+    for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        const currentState = state[state.length - 1] ?? null;
+
+        // Code block fences toggle state on ```
+        if (trimmed.startsWith("```")) {
+            if (currentState === "code_block") {
+                state.pop();
+            } else {
+                state.push("code_block");
+            }
+            tokens.push({ kind: "code_block_fence", fence: trimmed });
+            continue;
+        }
+
+        // Inside a code block — everything is literal text
+        if (currentState === "code_block") {
+            tokens.push({ kind: "text", content: rawLine });
+            continue;
+        }
+
+        // Outside code — try to parse as a table row
+        const row = tryParseTableRow(rawLine);
+        tokens.push(row ?? { kind: "text", content: rawLine });
+    }
+
+    return tokens;
+}
+
+// Character-by-character table row parser with backtick delimiter-pair
+// matching (stack semantics). Three phases:
+//   1. leading — text before the first unquoted pipe
+//   2. cells   — content between pipes (IS cell content)
+//   3. trailing — text after the last unquoted pipe
+function tryParseTableRow(raw: string): LineToken | null {
+    const line = raw.trim();
+
+    let leading = "";
+    let cells: string[] = [];
+    let cell = "";
+    let trailing = "";
+    let phase: "leading" | "cells" | "trailing" = "leading";
+
+    // Stack-based inline code tracking:
+    //   null  → not inside inline code
+    //   number → inside code, opened by N consecutive backticks
+    let codeDelim: number | null = null;
+    let i = 0;
+
+    while (i < line.length) {
+        const ch = line[i];
+
+        // Backtick grouping — treat consecutive backticks as a unit
+        if (ch === "`") {
+            let count = 1;
+            while (i + count < line.length && line[i + count] === "`") count++;
+
+            if (codeDelim === null) {
+                codeDelim = count;       // entering inline code
+            } else if (count === codeDelim) {
+                codeDelim = null;        // exiting inline code
+            }
+            // Different-length group inside code = content, not delimiter
+
+            const chunk = line.slice(i, i + count);
+            if (phase === "leading") leading += chunk;
+            else if (phase === "cells") cell += chunk;
+            else trailing += chunk;
+
+            i += count;
+            continue;
+        }
+
+        // Pipe outside of inline code → phase transition
+        if (ch === "|" && codeDelim === null) {
+            if (phase === "leading") {
+                leading = leading.trimEnd();
+                phase = "cells";
+            } else if (phase === "cells") {
+                cells.push(cell.trim());
+                cell = "";
+            }
+            // In trailing phase, a stray | is just literal text
+            else {
+                trailing += ch;
+            }
+            i++;
+            continue;
+        }
+
+        // Regular character — route to current phase
+        if (phase === "leading") leading += ch;
+        else if (phase === "cells") cell += ch;
+        else trailing += ch;
+        i++;
+    }
+
+    // Never entered the cells phase → not a table row
+    if (phase === "leading") return null;
+
+    // Need at least 2 cells (single pipe produces 2 cells minimum)
+    if (cells.length < 2 && cell.trim() === "") return null;
+
+    // Push the final cell if there's residual content after the last |
+    if (cell.trim() || cells.length > 0) cells.push(cell.trim());
+
+    // If every cell is empty the line had no real table content
+    if (cells.every(c => c === "")) return null;
+
+    return {
+        kind: "table_row",
+        cells,
+        leading: leading.trim(),
+        trailing: trailing.trim(),
+    };
+}
+
 // TABLE_ROW_RE captures three groups from a line containing a pipe-delimited structure:
 //   [1] Leading text before the first | (may be empty)
 //   [2] The clean pipe-delimited structure — from the first | to the last |  
