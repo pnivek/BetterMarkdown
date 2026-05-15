@@ -101,9 +101,11 @@ function tokenize(content: string): LineToken[] {
             continue;
         }
 
-        // Outside code — try to parse as a table row
+        // Outside code — try table first, then task list, then plain text
         const row = tryParseTableRow(rawLine);
-        tokens.push(row ?? { kind: "text", content: rawLine });
+        if (row) { tokens.push(row); continue; }
+        const task = tryParseTaskListItem(rawLine);
+        tokens.push(task ?? { kind: "text", content: rawLine });
     }
 
     return tokens;
