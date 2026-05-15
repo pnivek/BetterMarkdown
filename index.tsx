@@ -30,7 +30,7 @@ function isTableRow(l: string): boolean {
     const t = l.trim();
     if (!TABLE_ROW_RE.test(t)) return false;
     // Pipes inside inline code backticks shouldn't count as table syntax
-    return TABLE_ROW_RE.test(t.replace(/`[^`]*`/g, ""));
+    return TABLE_ROW_RE.test(t.replace(/(`+)[\s\S]*?\1/g, ""));
 }
 function isSeparator(l: string): boolean {
     const cells = splitCells(l);
