@@ -2,27 +2,26 @@
  * BetterMarkdown — Renders GFM-style markdown tables inline in Discord messages.
  *
  * Architecture (two interception points):
- * 1. Flux event interception — Listens for MESSAGE_CREATE, MESSAGE_UPDATE,
- *    LOAD_MESSAGES_SUCCESS, CHANNEL_SELECT, and CONNECTION_OPEN to install a
- *    reactive getter for customRenderedContent on messages with table syntax.
- * 2. Parser.parse wrapper — Intercepts all calls to Discord's markdown parser
- *    so tables also render in MessageLogger edit history and any other context
- *    that calls Parser.parse directly.
+ * 1. Flux event interception — Installs a reactive getter for
+ *    customRenderedContent on messages with table syntax.
+ * 2. Parser.parse wrapper — Wraps Discord's markdown parser so tables
+ *    render in MessageLogger edit history and any other context.
  *
- * Parsing strategy:
- * - Single-pass content block parser (parseContentBlocks) splits a message into
- *   alternating text and table blocks by scanning lines.
- * - Table rows are detected via regex that captures the clean pipe structure
- *   (groups 1/2/3: leading text, pipe structure, trailing text).
- * - Inline code awareness: pipes inside backtick-delimited spans are excluded
- *   from table detection via code-stripped regex testing.
- * - Salvage fallback: when column counts don't match across a table run, the
- *   salvage path re-slices the lines and tries to parse header lines as a
- *   body-only table, then separator+body as another body-only table.
- * - Column consistency is enforced: mismatched rows produce separate tables.
+ * Parsing strategy (two-pass lexer + parser):
+ * - tokenize() — Single pass through content with a stack for nested state
+ *   (code blocks). Produces line-level tokens: code_block_fence, table_row
+ *   (with pre-extracted cells + leading/trailing text), or text.
+ * - tryParseTableRow() — Backtick delimiter-pair matching (stack semantics)
+ *   extracts cells from the original line preserving inline code content.
+ * - parse() — Walks tokens, assembles ContentBlocks. Table rows group by
+ *   column count match — no salvage fallback, no re-slicing.
+ * - buildTables() — Column-aware table builder, splits on count mismatch.
+ * - isSeparatorCells() — Stateless check on pre-extracted cell arrays.
  *
- * TODO (future): Replace salvage fallback with a two-pass lexer + parser
- * architecture (tokenize once, parse blocks once — no re-slicing).
+ * Benefits over the previous approach:
+ * - One backtick-tracking implementation (vs 3 before)
+ * - No salvage fallback (column mismatch is a natural table boundary)
+ * - ContentBlock includes code_block variant for future extensibility
  */
 
 import definePlugin from "@utils/types";
