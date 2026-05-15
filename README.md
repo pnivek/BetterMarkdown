@@ -6,7 +6,7 @@ A [Vencord](https://vencord.dev) plugin that renders tables, task lists, and hor
 
 - **Tables** — Pipe-delimited tables render as styled HTML tables inline with the message content
 - **GFM table spec** — Supports headers, separators, alignment markers (`:---`, `:---:`, `---:`), and partial/continuation tables
-- **Task lists** — `- [ ]` and `- [x]` render as clickable checkboxes with proper styling
+- **Task lists** — `- [ ]` and `- [x]` render as styled checkboxes with proper styling
 - **Horizontal rules** — `---`, `***`, and `___` render as visible HR elements
 - **Escaped pipes** — `\|` inside table cells renders a literal pipe character without triggering a column break
 - **Column-consistent parsing** — Mismatched column counts produce separate tables instead of garbled output
