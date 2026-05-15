@@ -37,12 +37,17 @@ const SelectedChannelStore = findByPropsLazy("getChannelId");
 type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][] }
+    | { type: "task_list"; items: { checked: boolean; text: string }[] }
     | { type: "code_block"; content: string; fence: string };
 
 type LineToken =
     | { kind: "code_block_fence"; fence: string }
     | { kind: "table_row"; cells: string[]; leading: string; trailing: string }
+    | { kind: "task_list_item"; checked: boolean; text: string }
     | { kind: "text"; content: string };
+
+// Task list item regex
+const TASK_ITEM_RE = /^(-|\*|\+)\s+\[([ xX])\]\s+(.*)$/;
 
 function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
