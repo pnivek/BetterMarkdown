@@ -1,37 +1,4 @@
-/*
- * BetterMarkdown — Renders GFM-style markdown tables inline in Discord messages.
- *
- * Architecture (two interception points):
- * 1. Flux event interception — Installs a reactive getter for
- *    customRenderedContent on messages with table syntax.
- * 2. Parser.parse wrapper — Wraps Discord's markdown parser so tables,
- *    task lists, and horizontal rules render in MessageLogger edit history
- *    and any other context.
- *
- * Parsing strategy (two-pass lexer + parser):
- * - tokenize() — Single pass through content with a stack for nested state
- *   (code blocks). Produces line-level tokens: code_block_fence, table_row,
- *   task_list_item, horizontal_rule, or text.
- * - tryParseTableRow() — Backtick delimiter-pair matching (stack semantics)
- *   extracts cells from the original line preserving inline code content.
- * - tryParseTaskListItem() — Detects GFM task list syntax `- [ ]` / `- [x]`
- *   with code-aware matching to avoid false positives inside inline code.
- * - tryParseHorizontalRule() — Detects GFM horizontal rules (`---`, `***`,
- *   `___`) using a single regex pass, placed after table/task list checks
- *   to avoid conflicting with table separators.
- * - parse() — Walks tokens, assembles ContentBlocks. Table rows group by
- *   column count match; task items group into task_list blocks.
- *   No salvage fallback, no re-slicing.
- * - buildTables() — Column-aware table builder, splits on count mismatch.
- * - isSeparatorCells() — Stateless check on pre-extracted cell arrays.
- * - getColumnAlignment() — Extracts per-column alignment (`:---`, `:---:`, `---:`)
- *   from separator cells and applies it to table header rendering.
- *
- * Benefits over the previous approach:
- * - One backtick-tracking implementation (vs 3 before)
- * - No salvage fallback (column mismatch is a natural table boundary)
- * - ContentBlock includes code_block, task_list, and horizontal_rule variants for extensibility
- */
+// Intercepts Flux events to render GFM tables, task lists, and horizontal rules
 
 import definePlugin from "@utils/types";
 import { FluxDispatcher, Parser, React } from "@webpack/common";
@@ -95,8 +62,7 @@ function tryParseTaskListItem(raw: string): LineToken | null {
     const m = clean.match(TASK_ITEM_RE);
     if (!m) return null;
     const checked = m[2] === "x" || m[2] === "X";
-    // Prefix offset is the same between clean and original since no backticks
-    // appear before the text starts in a valid task list line.
+    // Prefix offset matches clean/original since no backticks precede `- [ ]`
     const prefixEnd = m.index! + m[0].length - m[3].length;
     const text = line.slice(prefixEnd).trim();
     return { kind: "task_list_item", checked, text };
@@ -158,11 +124,7 @@ function tokenize(content: string): LineToken[] {
     return tokens;
 }
 
-// Character-by-character table row parser with backtick delimiter-pair
-// matching (stack semantics). Three phases:
-//   1. leading — text before the first unquoted pipe
-//   2. cells   — content between pipes (IS cell content)
-//   3. trailing — text after the last unquoted pipe
+// Character-walk table row parser with backtick-pair matching. Phases: leading, cells, trailing
 function tryParseTableRow(raw: string): LineToken | null {
     const line = raw.trim();
 
@@ -173,13 +135,9 @@ function tryParseTableRow(raw: string): LineToken | null {
     let phase: "leading" | "cells" | "trailing" = "leading";
 
     // Stack-based inline code tracking:
-    //   null  → not inside inline code
-    //   number → inside code, opened by N consecutive backticks
+    // null = outside code, number = inside code opened by N backticks
     let codeDelim: number | null = null;
-    // Quote tracking: prevents pipes inside double-quoted strings like
-    // \`searching: "query1|query2|query3"\` from being treated as cell boundaries.
-    // Handles straight quotes (U+0022) and curly quotes (U+201C/U+201D) —
-    // agent tool output often uses typographic quotes.
+    // Tracks straight and curly double-quotes to suppress pipe boundaries in quoted strings
     let inQuote = false;
     let i = 0;
 
@@ -207,15 +165,12 @@ function tryParseTableRow(raw: string): LineToken | null {
             continue;
         }
 
-        // Double-quote toggle — only affects behavior outside inline code.
-        // Handles straight (U+0022) and curly (U+201C/U+201D) quotes since
-        // agent/CLI tool output often uses typographic quotation marks.
+        // Toggle inQuote on straight or curly double-quotes (outside code only)
         if (codeDelim === null && (ch === '"' || ch === "“" || ch === "”")) {
             inQuote = !inQuote;
         }
 
-        // Escaped pipe — \| outside code/quotes emits a literal | without
-        // triggering a column break, so table cells can contain pipe characters.
+        // Escaped pipe: \| outside code/quotes = literal pipe, not column break
         if (ch === '\\' && i + 1 < line.length && line[i + 1] === '|' && codeDelim === null && !inQuote) {
             if (phase === 'leading') leading += '|';
             else if (phase === 'cells') cell += '|';
@@ -310,7 +265,7 @@ function parse(tokens: LineToken[]): ContentBlock[] {
         const t = tokens[i];
 
         if (t.kind === "code_block_fence") {
-            // Collect entire code block: opening fence + content + closing fence
+            // Collect entire code block
             const fence = t.fence;
             const codeLines: string[] = [t.fence];
             i++;
