@@ -23,6 +23,8 @@
  *   No salvage fallback, no re-slicing.
  * - buildTables() — Column-aware table builder, splits on count mismatch.
  * - isSeparatorCells() — Stateless check on pre-extracted cell arrays.
+ * - getColumnAlignment() — Extracts per-column alignment (`:---`, `:---:`, `---:`)
+ *   from separator cells and applies it to table header rendering.
  *
  * Benefits over the previous approach:
  * - One backtick-tracking implementation (vs 3 before)
@@ -42,7 +44,7 @@ const SelectedChannelStore = findByPropsLazy("getChannelId");
 
 type ContentBlock =
     | { type: "text"; text: string }
-    | { type: "table"; header: string[]; body: string[][] }
+    | { type: "table"; header: string[]; body: string[][]; alignment?: ("left" | "center" | "right" | null)[] }
     | { type: "task_list"; items: { checked: boolean; text: string }[] }
     | { type: "horizontal_rule" }
     | { type: "code_block"; content: string; fence: string };
@@ -63,6 +65,23 @@ const HR_RE = /^\s*[-*_](?:\s*[-*_]){2,}\s*$/;
 
 function isSeparatorCells(cells: string[]): boolean {
     return cells.length > 0 && cells.every(c => /^:?-+:?$/.test(c));
+}
+
+// Extracts per-column text alignment from a GFM separator row.
+//   :---  → left
+//   :---: → center
+//   ---:  → right
+//   ----  → null (browser default — left for <th>)
+function getColumnAlignment(cells: string[]): ("left" | "center" | "right" | null)[] {
+    return cells.map(c => {
+        const t = c.trim();
+        const left = t.startsWith(":");
+        const right = t.endsWith(":");
+        if (left && right) return "center";
+        if (left) return "left";
+        if (right) return "right";
+        return null;
+    });
 }
 
 // GFM task list item parser. Detects `- [ ]`, `- [x]`, `- [X]`, `* [ ]`, `+ [ ]`.
@@ -392,10 +411,12 @@ function buildTables(
                 bodyRows.every(r => r.cells.length === header.length);
 
             if (bodyOk && header.length >= 1) {
+                const alignment = getColumnAlignment(rows[absSep].cells);
                 blocks.push({
                     type: "table",
                     header,
                     body: bodyRows.map(r => r.cells),
+                    alignment,
                 });
                 start = absSep + 1 + bodyRows.length;
                 continue;
@@ -415,17 +436,19 @@ function buildTables(
                    !isSeparatorCells(rows[end].cells)) end++;
 
             if (cellCount >= 2) {
+                const alignment = getColumnAlignment(rows[absSep].cells);
                 blocks.push({
                     type: "table",
                     header: [],
                     body: bodyRows.slice(0, end - (start + 1)).map(r => r.cells),
+                    alignment,
                 });
             }
             start = end;
             continue;
         }
 
-        // Case 3: no separator — body-only table
+        // Case 3: no separator — no alignment info — body-only table
         const cellCount = rows[start].cells.length;
         if (cellCount < 2) {
             // Single cell row → treat as regular text
@@ -454,12 +477,13 @@ function needsInterception(c: string): boolean {
 function parseContentBlocks(c: string): ContentBlock[] {
     return parse(tokenize(c));
 }
-function TableComponent({ header, body }: { header: string[]; body: string[][] }) {
+function TableComponent({ header, body, alignment }: { header: string[]; body: string[][]; alignment?: ("left" | "center" | "right" | null)[] }) {
     const inlineOpts = { allowLinks: true, allowList: true };
+    const align = (i: number): string => alignment?.[i] ?? "left";
     return (<div style={{ marginTop: 4, marginBottom: 4, overflow: "hidden", borderRadius: 4, border: "2px solid var(--background-surface-high)", background: "var(--background-secondary)", color: "var(--text-normal)", maxWidth: "100%" }}>
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "var(--font-primary)" }}>
-            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: "left", fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
-            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
+            {header.length > 0 && <thead><tr>{header.map((c, i) => <th key={i} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", textAlign: align(i) as any, fontWeight: 600, background: "var(--background-surface-high)" }}>{Parser.parse(c, true, inlineOpts) ?? c}</th>)}</tr></thead>}
+            {body.length > 0 && <tbody>{body.map((row, ri) => <tr key={ri}>{row.map((c, ci) => <td key={ci} style={{ border: "2px solid var(--background-surface-high)", padding: "8px 12px", background: "var(--background-base-lowest)", textAlign: align(ci) as any }}>{Parser.parse(c, true, inlineOpts) ?? c}</td>)}</tr>)}</tbody>}
         </table></div>);
 }
 function TaskListComponent({ items }: { items: { checked: boolean; text: string }[] }) {
@@ -487,7 +511,7 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
             ch.push(React.createElement(React.Fragment, { key: ch.length },
                 Parser.parse(b.text, false, textOpts)));
         } else if (b.type === "table") {
-            ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+            ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
         } else if (b.type === "horizontal_rule") {
             ch.push(React.createElement("div", {
                 key: ch.length,
@@ -623,7 +647,7 @@ export default definePlugin({
                     ch.push(React.createElement(React.Fragment, { key: ch.length },
                         _origParse!.call(this, b.text, inline, opts)));
                 } else if (b.type === "table") {
-                    ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+                    ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body, alignment: (b as any).alignment }));
                 } else if (b.type === "horizontal_rule") {
                     ch.push(React.createElement("div", {
                         key: ch.length,
