@@ -351,8 +351,12 @@ function renderContent(blocks: ContentBlock[]): React.ReactNode {
         if (b.type === "text") {
             ch.push(React.createElement(React.Fragment, { key: ch.length },
                 Parser.parse(b.text, false, textOpts)));
-        } else {
+        } else if (b.type === "table") {
             ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+        } else {
+            // code_block — pass through to Discord's parser as-is
+            ch.push(React.createElement(React.Fragment, { key: ch.length },
+                Parser.parse(b.content, false, textOpts)));
         }
     }
     return React.createElement(React.Fragment, null, ...ch);
@@ -476,8 +480,12 @@ export default definePlugin({
                 if (b.type === "text") {
                     ch.push(React.createElement(React.Fragment, { key: ch.length },
                         _origParse!.call(this, b.text, inline, opts)));
-                } else {
+                } else if (b.type === "table") {
                     ch.push(React.createElement(TableComponent, { key: ch.length, header: b.header, body: b.body }));
+                } else {
+                    // code_block — pass through to Discord's parser
+                    ch.push(React.createElement(React.Fragment, { key: ch.length },
+                        _origParse!.call(this, b.content, inline, opts)));
                 }
             }
             return React.createElement(React.Fragment, null, ...ch);
