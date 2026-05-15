@@ -1,5 +1,3 @@
-// Parsing is pure logic — no webpack imports needed
-
 export type ContentBlock =
     | { type: "text"; text: string }
     | { type: "table"; header: string[]; body: string[][]; alignment?: ("left" | "center" | "right" | null)[] }
