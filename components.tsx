@@ -33,6 +33,7 @@ export function TableComponent({
         width: "100%",
         fontSize: 13,
         fontFamily: "var(--font-primary)",
+        tableLayout: "fixed",
     };
 
     const headerCellStyle = (i: number): React.CSSProperties => ({
@@ -50,9 +51,19 @@ export function TableComponent({
         textAlign: align(i) as any,
     });
 
+    const colCount = header.length || body[0]?.length || 0;
+
     return (
         <div style={wrapperStyle}>
             <table style={tableStyle}>
+                {colCount > 0 && (
+                    <colgroup>
+                        {Array.from({ length: colCount - 1 }, (_, i) => (
+                            <col key={i} style={{ width: "1%" }} />
+                        ))}
+                        <col />
+                    </colgroup>
+                )}
                 {header.length > 0 && (
                     <thead>
                         <tr>
