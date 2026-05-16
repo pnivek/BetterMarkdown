@@ -138,7 +138,9 @@ export default definePlugin({
     },
 
     stop() {
-        this._unsubs.forEach(u => u());
+        for (const u of this._unsubs) {
+            if (typeof u === "function") u();
+        }
         this._unsubs = [];
         if (_origParse && Parser.parse !== _origParse) {
             Parser.parse = _origParse;
