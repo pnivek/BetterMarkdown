@@ -25,7 +25,7 @@ export function TableComponent({
         border: "2px solid var(--background-surface-high)",
         background: "var(--background-secondary)",
         color: "var(--text-normal)",
-        maxWidth: "100%",
+        maxWidth: "90%",
     };
 
     const tableStyle: React.CSSProperties = {
@@ -99,6 +99,7 @@ export function TaskListComponent({ items }: { items: { checked: boolean; text: 
         color: "var(--text-normal)",
         fontFamily: "var(--font-primary)",
         fontSize: 13,
+        maxWidth: "90%",
     };
 
     const rowStyle: React.CSSProperties = {
@@ -191,6 +192,7 @@ export function renderContent(
                     height: 0,
                     borderBottom: "2px solid var(--background-surface-high)",
                     margin: "8px 0",
+                    maxWidth: "90%",
                 },
             }));
         } else if (b.type === "task_list") {
