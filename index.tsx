@@ -41,7 +41,6 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
     const chId = channelIdIn || message?.channel_id;
     if (!chId || !message?.content || typeof message.content !== "string") return;
     if (!hasSupportedSyntax(message.content)) return;
-    logger.log(source + ": table in msg", message.id);
 
     message.customRenderedContent = {
         content: renderContent(parseContentBlocks(message.content)),
@@ -52,7 +51,6 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
         const stored = MessageStore?.getMessage(chId, message.id);
         if (stored) {
             installGetter(stored);
-            logger.log(source + ": getter on stored msg", stored.id);
         }
     } catch (e: any) {
         logger.warn(source + ": getter failed:", e.message);
@@ -63,7 +61,7 @@ function handleMsg(channelIdIn: string, message: any, source: string) {
             const stored = MessageStore?.getMessage(chId, message.id);
             if (stored) {
                 const desc = Object.getOwnPropertyDescriptor(stored, "customRenderedContent");
-                if (!desc) { installGetter(stored); logger.log(source + ": getter via microtask", stored.id); }
+                if (!desc) { installGetter(stored); }
             }
         } catch {}
     });
@@ -105,8 +103,6 @@ export default definePlugin({
     _unsubs: [] as (() => void)[],
 
     start() {
-        logger.log("start()");
-
         _origParse = Parser.parse;
         Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
             if (typeof content !== "string" || !hasSupportedSyntax(content)) {
