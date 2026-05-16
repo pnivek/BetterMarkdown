@@ -16,6 +16,12 @@ export function TableComponent({
 }) {
     const inlineOpts = { allowLinks: true, allowList: true };
     const align = (i: number): string => alignment?.[i] ?? "left";
+    const colCount = header.length || body[0]?.length || 0;
+
+    const contentColStyle: React.CSSProperties = {
+        width: "1%",
+        whiteSpace: "nowrap",
+    };
 
     const wrapperStyle: React.CSSProperties = {
         marginTop: 4,
@@ -33,7 +39,6 @@ export function TableComponent({
         width: "100%",
         fontSize: 13,
         fontFamily: "var(--font-primary)",
-        tableLayout: "fixed",
     };
 
     const headerCellStyle = (i: number): React.CSSProperties => ({
@@ -51,24 +56,14 @@ export function TableComponent({
         textAlign: align(i) as any,
     });
 
-    const colCount = header.length || body[0]?.length || 0;
-
     return (
         <div style={wrapperStyle}>
             <table style={tableStyle}>
-                {colCount > 0 && (
-                    <colgroup>
-                        {Array.from({ length: colCount - 1 }, (_, i) => (
-                            <col key={i} style={{ width: "1%" }} />
-                        ))}
-                        <col />
-                    </colgroup>
-                )}
                 {header.length > 0 && (
                     <thead>
                         <tr>
                             {header.map((c, i) => (
-                                <th key={i} style={headerCellStyle(i)}>
+                                <th key={i} style={{ ...headerCellStyle(i), ...(i < colCount - 1 ? contentColStyle : {}) }}>
                                     {Parser.parse(c, true, inlineOpts) ?? c}
                                 </th>
                             ))}
@@ -81,7 +76,7 @@ export function TableComponent({
                         {body.map((row, ri) => (
                             <tr key={ri}>
                                 {row.map((c, ci) => (
-                                    <td key={ci} style={bodyCellStyle(ci)}>
+                                    <td key={ci} style={{ ...bodyCellStyle(ci), ...(ci < colCount - 1 ? contentColStyle : { wordBreak: "break-word" }) }}>
                                         {Parser.parse(c, true, inlineOpts) ?? c}
                                     </td>
                                 ))}
