@@ -103,13 +103,37 @@ export default definePlugin({
     _unsubs: [] as (() => void)[],
 
     start() {
+        // debug instrumentation
+        const dbg = window.__bm ?? (window as any).__bm ?? {};
+        Object.assign(dbg, { calls: 0, passthroughs: 0, renders: 0, last: [] });
+        (window as any).__bm = dbg;
+
         _origParse = Parser.parse;
         Parser.parse = function(this: any, content: string, inline: boolean, opts: any) {
+            const caller = dbg.calls++;
+            const truncated = typeof content === "string" ? content.slice(0, 200) : null;
+
             if (typeof content !== "string" || !hasSupportedSyntax(content)) {
+                dbg.passthroughs++;
+                const result = _origParse!.call(this, content, inline, opts);
+                const resultStr = typeof result === "string" ? `str(${result.length})` : result != null ? typeof result : "null/undef";
+                const entry = { caller, path: "passthrough", content: truncated, inline, opts, resultStr };
+                dbg.last = [...dbg.last.slice(-9), entry];
+                if (dbg.calls % 50 === 0) console.log("[BM]", dbg.calls, "calls, passthroughs:", dbg.passthroughs, "renders:", dbg.renders);
+                return result;
+            }
+            dbg.renders++;
+            const blocks = parseContentBlocks(content);
+            const entry = { caller, path: "render", content: truncated, inline, opts, blocks: blocks.map(b => b.type) };
+            dbg.last = [...dbg.last.slice(-9), entry];
+            try {
+                const rendered = renderContent(blocks, _origParse!.bind(this), inline, opts);
+                if (dbg.calls % 50 === 0) console.log("[BM]", dbg.calls, "calls, passthroughs:", dbg.passthroughs, "renders:", dbg.renders);
+                return rendered;
+            } catch (e) {
+                console.error("[BM] renderContent threw:", e);
                 return _origParse!.call(this, content, inline, opts);
             }
-            const blocks = parseContentBlocks(content);
-            return renderContent(blocks, _origParse!.bind(this), inline, opts);
         };
 
         if (!FluxDispatcher) return;
